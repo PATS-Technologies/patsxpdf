@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:17-bookworm
+    container_name: patsxpdf-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-patsxpdf}
+      POSTGRES_USER: ${POSTGRES_USER:-patsxpdf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-patsxpdf}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-patsxpdf} -d ${POSTGRES_DB:-patsxpdf}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+
+  app:
+    build: .
+    container_name: patsxpdf-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-patsxpdf}:${POSTGRES_PASSWORD:-patsxpdf}@db:5432/${POSTGRES_DB:-patsxpdf}
+      SESSION_SECRET: ${SESSION_SECRET:-troque-esta-chave-em-producao}
+      PDF_STORAGE: /data/pdfs
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - pdf-data:/data/pdfs
+
+volumes:
+  postgres-data:
+  pdf-data:
