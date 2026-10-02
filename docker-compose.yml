@@ -16,6 +16,35 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
 
+  font-catalog:
+    image: gotenberg/gotenberg:8
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "fc-list --format='%{family}\\n' | sort -fu > /font-data/families.txt && chmod 644 /font-data/families.txt"
+    volumes:
+      - ${WINDOWS_FONTS_PATH:-/mnt/c/Windows/Fonts}:/usr/local/share/fonts/windows:ro
+      - font-catalog:/font-data
+
+  libreoffice:
+    image: gotenberg/gotenberg:8
+    container_name: patsxpdf-libreoffice
+    restart: unless-stopped
+    depends_on:
+      font-catalog:
+        condition: service_completed_successfully
+    command:
+      - "gotenberg"
+      - "--api-timeout=${OFFICE_CONVERTER_TIMEOUT:-120s}"
+      - "--api-body-limit=${MAX_UPLOAD_MB:-100}MB"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - ${WINDOWS_FONTS_PATH:-/mnt/c/Windows/Fonts}:/usr/local/share/fonts/windows:ro
+
   app:
     build: .
     container_name: patsxpdf-app
@@ -23,16 +52,25 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      libreoffice:
+        condition: service_healthy
+      font-catalog:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-patsxpdf}:${POSTGRES_PASSWORD:-patsxpdf}@db:5432/${POSTGRES_DB:-patsxpdf}
       SESSION_SECRET: ${SESSION_SECRET:-troque-esta-chave-em-producao}
       PDF_STORAGE: /data/pdfs
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      OFFICE_CONVERTER_URL: http://libreoffice:3000
+      OFFICE_CONVERTER_TIMEOUT_MS: ${OFFICE_CONVERTER_TIMEOUT_MS:-120000}
+      OFFICE_FONT_CATALOG: /data/font-catalog/families.txt
     ports:
       - "${APP_PORT:-3000}:3000"
     volumes:
       - pdf-data:/data/pdfs
+      - font-catalog:/data/font-catalog:ro
 
 volumes:
   postgres-data:
   pdf-data:
+  font-catalog:

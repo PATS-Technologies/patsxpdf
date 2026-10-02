@@ -11,7 +11,7 @@ import {
   Highlighter,
   LoaderCircle,
   LogOut, LucideFile,
-  MessageSquareText, MoveHorizontal, MoveVertical,
+  ListChecks, MessageSquareText, MoveHorizontal, MoveVertical,
   Pencil, Play, Plus,
   RectangleHorizontal, RotateCcw, RotateCw,
   Search, StepBack, StepForward,
@@ -21,6 +21,8 @@ import {
 import type { SessionUser } from "@/lib/auth";
 import type { SearchOptions } from "@/components/PdfViewer";
 import { ParametersPanel, UserProfileDialog, UsersPanel } from "@/components/Administration";
+import { ConversionsPanel } from "@/components/ConversionsPanel";
+import { isEditableTarget, TablePagination, useEscape, usePaginatedItems } from "@/components/TablePagination";
 import { useI18n } from "@/components/I18nProvider";
 import { localeFlags, type TranslationKey } from "@/lib/i18n";
 
@@ -38,6 +40,7 @@ function closeOpenMenus(except?: HTMLDetailsElement) {
 
 function ModalFrame({ title, children, onClose, closeLabel, wide = false }: { title: string; children: ReactNode; onClose: () => void; closeLabel: string; wide?: boolean }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  useEscape(onClose);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -92,19 +95,28 @@ export default function Workbench({ user }: { user: SessionUser }) {
   const [matches, setMatches] = useState<{ page: number; text: string }[]>([]);
   const [tool, setTool] = useState("select");
   const [annotationColor, setAnnotationColor] = useState("#f5d90a");
-  const [view, setView] = useState<"viewer" | "params" | "users">("viewer");
+  const [view, setView] = useState<"viewer" | "params" | "users" | "conversions">("viewer");
   const [profileOpen, setProfileOpen] = useState(false);
+  const [selectedConversionId, setSelectedConversionId] = useState<string | null>(null);
   const active = openPdfs.find((item) => item.id === activeId) ?? null;
 
   const loadLibrary = useCallback(async () => {
     const response = await fetch("/api/documents");
-    if (response.ok) setLibrary(await response.json());
+    if (response.ok) {
+      const records = await response.json() as PdfRecord[];
+      setLibrary(records);
+      setSelectedId((current) => current && records.some((item) => item.id === current) ? current : records[0]?.id ?? null);
+    }
   }, []);
 
   useEffect(() => {
     let activeRequest = true;
     fetch("/api/documents").then((response) => response.ok ? response.json() : []).then((data) => {
-      if (activeRequest) setLibrary(data);
+      if (activeRequest) {
+        const records = data as PdfRecord[];
+        setLibrary(records);
+        setSelectedId((current) => current && records.some((item) => item.id === current) ? current : records[0]?.id ?? null);
+      }
     });
     return () => { activeRequest = false; };
   }, []);
@@ -116,6 +128,18 @@ export default function Workbench({ user }: { user: SessionUser }) {
     }
     document.addEventListener("pointerdown", closeMenusOutside);
     return () => document.removeEventListener("pointerdown", closeMenusOutside);
+  }, []);
+
+  useEffect(() => {
+    function preventFileNavigation(event: globalThis.DragEvent) {
+      if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+    }
+    document.addEventListener("dragover", preventFileNavigation);
+    document.addEventListener("drop", preventFileNavigation);
+    return () => {
+      document.removeEventListener("dragover", preventFileNavigation);
+      document.removeEventListener("drop", preventFileNavigation);
+    };
   }, []);
 
   function openDocument(record: PdfRecord) {
@@ -148,19 +172,37 @@ export default function Workbench({ user }: { user: SessionUser }) {
 
   async function upload(file?: File) {
     if (!file) return;
+    const isOfficeDocument = /\.(docx|xlsx|pptx)$/i.test(file.name);
+    const conversionId = isOfficeDocument ? crypto.randomUUID() : null;
     setModal(null);
     setUploading(true);
-    setProcessing(true);
+    setProcessing(!isOfficeDocument);
+    if (conversionId) {
+      setSelectedConversionId(conversionId);
+      setView("conversions");
+    }
     try {
-      const data = new FormData(); data.set("file", file);
+      const data = new FormData();
+      data.set("file", file);
+      if (conversionId) data.set("conversionId", conversionId);
       const response = await fetch("/api/documents", { method: "POST", body: data });
       const result = await response.json();
       if (!response.ok) {
         setProcessing(false);
+        if (result.conversionId) {
+          setSelectedConversionId(result.conversionId);
+          setView("conversions");
+          return;
+        }
         return window.alert(result.error ?? t("viewer.uploadFailed"));
       }
       await loadLibrary();
-      openDocument(result);
+      if (result.officeDocument) {
+        setSelectedConversionId(result.conversionId);
+        setView("conversions");
+      } else {
+        openDocument(result);
+      }
     } catch {
       setProcessing(false);
       window.alert(t("viewer.uploadFailed"));
@@ -191,6 +233,44 @@ export default function Workbench({ user }: { user: SessionUser }) {
 
   async function logout() { await fetch("/api/auth/logout", { method: "POST" }); router.replace("/login"); router.refresh(); }
   const sortedLibrary = [...library].sort((a, b) => String(a[sort.key] ?? "").localeCompare(String(b[sort.key] ?? ""), locale, { numeric: true }) * sort.direction);
+  const selectedLibraryIndex = sortedLibrary.findIndex((item) => item.id === selectedId);
+  const {
+    page: libraryPage,
+    pageCount: libraryPageCount,
+    pageItems: libraryPageItems,
+    setContainer: setLibraryContainer,
+    setPage: setLibraryPage,
+  } = usePaginatedItems({
+    items: sortedLibrary,
+    active: modal === "library",
+    allowInModal: true,
+    selectedIndex: selectedLibraryIndex,
+    onSelectIndex: (index) => setSelectedId(sortedLibrary[index].id),
+  });
+
+  useEffect(() => {
+    if (view !== "viewer" || !activeId || modal || profileOpen) return;
+    function handleViewerKeys(event: KeyboardEvent) {
+      if (event.defaultPrevented || isEditableTarget(event.target)) return;
+      let destination: "previous" | "next" | "first" | "last" | null = null;
+      if (event.key === "PageDown" && !event.ctrlKey && !event.altKey && !event.metaKey) destination = "next";
+      else if (event.key === "PageUp" && !event.ctrlKey && !event.altKey && !event.metaKey) destination = "previous";
+      else if (event.ctrlKey && event.key === "Home") destination = "first";
+      else if (event.ctrlKey && event.key === "End") destination = "last";
+      if (!destination) return;
+
+      event.preventDefault();
+      setOpenPdfs((current) => current.map((item) => {
+        if (item.id !== activeId) return item;
+        if (destination === "first") return { ...item, page: 1 };
+        if (destination === "last") return { ...item, page: item.page_count };
+        if (destination === "next") return { ...item, page: Math.min(item.page_count, item.page + 1) };
+        return { ...item, page: Math.max(1, item.page - 1) };
+      }));
+    }
+    document.addEventListener("keydown", handleViewerKeys);
+    return () => document.removeEventListener("keydown", handleViewerKeys);
+  }, [activeId, modal, profileOpen, view]);
 
   return (
     <main className={`workbench ${view === "viewer" ? "" : "administration-view"}`}>
@@ -204,6 +284,7 @@ export default function Workbench({ user }: { user: SessionUser }) {
           <Menu label={t("menu.file")}>
             <MenuItem onClick={() => setModal("upload")}><FilePlus2 size={15} />{t("menu.upload")}</MenuItem>
             <MenuItem onClick={() => setModal("library")}><FolderOpen size={15} />{t("menu.open")}</MenuItem><span className="menu-separator" />
+            <MenuItem onClick={() => setView("conversions")}><ListChecks size={15} />{t("menu.conversions")}</MenuItem>
             <MenuItem disabled={!active} onClick={() => closeDocument()}>{t("common.close")}</MenuItem>
             <MenuItem disabled={!openPdfs.length} onClick={() => { if (confirm(t("menu.confirmCloseAll"))) { setOpenPdfs([]); setActiveId(null); setProcessing(false); } }}>{t("menu.closeAll")}</MenuItem><span className="menu-separator" />
             <MenuItem onClick={logout}><LogOut size={15} />{t("menu.logout")}</MenuItem>
@@ -354,9 +435,11 @@ export default function Workbench({ user }: { user: SessionUser }) {
       {/* Document */}
       <section className="workspace">
         {view === "params" 
-          ? <ParametersPanel /> 
+          ? <ParametersPanel onClose={() => setView("viewer")} /> 
           : view === "users" 
-          ? <UsersPanel isAdmin={user.isAdmin} /> 
+          ? <UsersPanel isAdmin={user.isAdmin} onClose={() => setView("viewer")} /> 
+          : view === "conversions"
+          ? <ConversionsPanel user={user} selectedId={selectedConversionId} onSelect={setSelectedConversionId} onOpen={openDocument} onClose={() => setView("viewer")} />
           : active 
             ? <PdfViewer
               key={active.id}
@@ -416,10 +499,10 @@ export default function Workbench({ user }: { user: SessionUser }) {
       {profileOpen && <UserProfileDialog onClose={() => setProfileOpen(false)} />}
       
       {/* Modals for upload, library, windows, and help */}
-      {modal === "upload" && <ModalFrame title={t("viewer.uploadTitle")} closeLabel={t("common.close")} onClose={() => setModal(null)}><div className={`drop-zone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent) => { event.preventDefault(); setDragging(false); void upload(event.dataTransfer.files[0]); }}><FilePlus2 size={34} /><strong>{uploading ? t("viewer.uploading") : t("viewer.dropPdf")}</strong><span>{t("viewer.chooseFile")}</span><button className="primary-button" disabled={uploading} onClick={() => inputRef.current?.click()}>{t("viewer.browse")}</button><input ref={inputRef} hidden type="file" accept="application/pdf,.pdf" onChange={(event: ChangeEvent<HTMLInputElement>) => void upload(event.target.files?.[0])} /></div></ModalFrame>}
-      {modal === "library" && <ModalFrame title={t("viewer.openTitle")} closeLabel={t("common.close")} wide onClose={() => setModal(null)}><div className="modal-actions"><button className="primary-button" disabled={!selectedId} onClick={() => { const record = library.find((item) => item.id === selectedId); if (record) openDocument(record); }}><FolderOpen size={16} />{t("common.open")}</button></div><div className="table-scroll"><table><thead><tr>{[["original_name", t("viewer.file")], ["uploaded_at", t("viewer.uploadDate")], ["document_date", t("viewer.documentDate")], ["page_count", t("viewer.pages", { count: "" }).trim()]].map(([key, label]) => <th key={key} onClick={() => setSort({ key: key as keyof PdfRecord, direction: sort.key === key ? (sort.direction * -1) as 1 | -1 : 1 })}>{label}{sort.key === key ? (sort.direction === 1 ? " ↑" : " ↓") : ""}</th>)}</tr></thead><tbody>{sortedLibrary.map((item) => <tr key={item.id} className={selectedId === item.id ? "selected" : ""} onClick={() => setSelectedId(item.id)} onDoubleClick={() => openDocument(item)}><td>{item.original_name}</td><td>{formatDate(item.uploaded_at)}</td><td>{item.document_date ? formatDate(item.document_date) : "-"}</td><td>{formatNumber(item.page_count)}</td></tr>)}</tbody></table></div></ModalFrame>}
+      {modal === "upload" && <ModalFrame title={t("viewer.uploadTitle")} closeLabel={t("common.close")} onClose={() => setModal(null)}><div className={`drop-zone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent) => { event.preventDefault(); setDragging(false); void upload(event.dataTransfer.files[0]); }}><FilePlus2 size={34} /><strong>{uploading ? t("viewer.uploading") : t("viewer.dropPdf")}</strong><span>{t("viewer.chooseFile")}</span><button className="primary-button" disabled={uploading} onClick={() => inputRef.current?.click()}>{t("viewer.browse")}</button><input ref={inputRef} hidden type="file" accept="application/pdf,.pdf,.docx,.xlsx,.pptx" onChange={(event: ChangeEvent<HTMLInputElement>) => void upload(event.target.files?.[0])} /></div></ModalFrame>}
+      {modal === "library" && <ModalFrame title={t("viewer.openTitle")} closeLabel={t("common.close")} wide onClose={() => setModal(null)}><div className="modal-actions"><button className="primary-button" disabled={!selectedId} onClick={() => { const record = library.find((item) => item.id === selectedId); if (record) openDocument(record); }}><FolderOpen size={16} />{t("common.open")}</button></div><div ref={setLibraryContainer} className="table-scroll"><table><thead><tr>{[["original_name", t("viewer.file")], ["uploaded_at", t("viewer.uploadDate")], ["document_date", t("viewer.documentDate")], ["page_count", t("viewer.pages", { count: "" }).trim()]].map(([key, label]) => <th key={key} onClick={() => setSort({ key: key as keyof PdfRecord, direction: sort.key === key ? (sort.direction * -1) as 1 | -1 : 1 })}>{label}{sort.key === key ? (sort.direction === 1 ? " ↑" : " ↓") : ""}</th>)}</tr></thead><tbody>{libraryPageItems.map((item) => <tr key={item.id} className={selectedId === item.id ? "selected" : ""} onClick={() => setSelectedId(item.id)} onDoubleClick={() => openDocument(item)}><td>{item.original_name}</td><td>{formatDate(item.uploaded_at)}</td><td>{item.document_date ? formatDate(item.document_date) : "-"}</td><td>{formatNumber(item.page_count)}</td></tr>)}</tbody></table></div><TablePagination page={libraryPage} pageCount={libraryPageCount} onPageChange={setLibraryPage} /></ModalFrame>}
       {modal === "windows" && <ModalFrame title={t("viewer.openWindows")} closeLabel={t("common.close")} wide onClose={() => setModal(null)}><div className="window-grid">{openPdfs.map((item) => <button key={item.id} onDoubleClick={() => { activateDocument(item.id); setModal(null); }}>{item.original_name}<small>{t("viewer.pages", { count: formatNumber(item.page_count) })}</small></button>)}</div></ModalFrame>}
-      {modal === "help" && <ModalFrame title="PatsXPDF" closeLabel={t("common.close")} onClose={() => setModal(null)}><div className="about-content"><div className="brand-mark">P</div><h3>{t("viewer.about")}</h3><p>{t("viewer.version")}</p></div></ModalFrame>}
+      {modal === "help" && <ModalFrame title="PATSXPDF" closeLabel={t("common.close")} onClose={() => setModal(null)}><div className="about-content"><div className="brand-mark">P</div><h3>{t("viewer.about")}</h3><p>{t("viewer.version")}</p></div></ModalFrame>}
 
       {/* Overlay processing... */}
       {processing && <div className="processing-overlay" role="status" aria-live="assertive" aria-label={t("viewer.processing")}><div className="processing-indicator"><LoaderCircle size={30} aria-hidden="true" /><strong>{t("viewer.processing")}</strong></div></div>}

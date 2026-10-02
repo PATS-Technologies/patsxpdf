@@ -19,7 +19,7 @@ const geist = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "PatsXPDF Viewer",
+  title: "PATSXPDF Viewer",
   description: "Visualizador e revisor de documentos PDF",
 };
 

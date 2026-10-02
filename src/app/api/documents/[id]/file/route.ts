@@ -14,8 +14,9 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
     if (!document) return new Response(await serverTranslate("error.pdfNotFound"), { status: 404 });
     const storagePath = process.env.PDF_STORAGE ?? path.join(process.cwd(), "data", "pdfs");
     const bytes = await readFile(/* turbopackIgnore: true */ path.join(/* turbopackIgnore: true */ storagePath, document.storage_name));
+    const pdfFileName = `${path.parse(document.original_name).name}.pdf`;
     return new Response(bytes, {
-      headers: { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(document.original_name)}` },
+      headers: { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(pdfFileName)}` },
     });
   } catch (error) { return apiError(error); }
 }

@@ -4,6 +4,7 @@ import { FormEvent, useState } from "react";
 import { KeyRound, LogIn, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { LocaleSwitcher, useI18n } from "@/components/I18nProvider";
+import { useEscape } from "@/components/TablePagination";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -73,6 +74,7 @@ function PasswordSetupDialog({ login, onClose }: { login: string; onClose: () =>
   const { t } = useI18n();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  useEscape(onClose);
 
   async function activate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

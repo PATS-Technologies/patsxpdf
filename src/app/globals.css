@@ -160,6 +160,9 @@ dialog.modal::backdrop { background:rgba(15,25,23,.64); }
 .drop-zone strong { color:var(--ink); }
 .modal-actions { display:flex; padding:10px; border-bottom:1px solid var(--line); }
 .table-scroll { max-height:60dvh; overflow:auto; }
+.table-pagination { display:flex; align-items:center; justify-content:flex-end; gap:12px; padding:8px 10px; border:1px solid var(--line); border-top:0; background:white; font-size:11px; }
+.table-pagination button { display:flex; align-items:center; gap:4px; min-height:27px; padding:4px 7px; }
+.table-pagination span { min-width:90px; text-align:center; }
 table { width:100%; border-collapse:collapse; background:white; font-size:12px; }
 th { position:sticky; z-index:2; top:0; padding:9px 10px; color:#584941; background:#ebe4df; text-align:left; cursor:pointer; white-space:nowrap; }
 td { border-bottom:1px solid var(--line); padding:8px 10px; }
@@ -190,8 +193,13 @@ tbody tr:hover,tbody tr.selected { background:#f5e6dc; }
 .row-actions { width:75px; white-space:nowrap; }
 .row-actions button { width:26px; height:26px; display:inline-grid; place-items:center; background:transparent; }
 .status { display:inline-block; padding:3px 7px; color:#743006; background:#f5ddcc; font-size:10px; font-weight:800; text-transform:uppercase; }
+.status.ok { color:#18643a; background:#d8efdf; }
 .status.danger { color:#862c2e; background:#f6d9da; }
 .status.warning { color:#7d3105; background:#ffd7b5; }
+.conversion-view { display:inline-flex; align-items:center; gap:5px; padding:5px 8px; }
+.conversion-message { max-width:360px; overflow:hidden; padding:0; color:#8f3f0b; background:transparent; text-align:left; text-overflow:ellipsis; white-space:nowrap; }
+.conversion-details { width:min(720px,96vw); }
+.conversion-details pre { max-height:65dvh; overflow:auto; margin:0; padding:18px; background:#f5f7f4; font:12px/1.6 "Courier New",monospace; white-space:pre-wrap; }
 .user-modal { width:min(720px,96vw); overflow-y:auto; }
 .user-form { display:grid; gap:18px; padding:18px; }
 .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:13px; }
