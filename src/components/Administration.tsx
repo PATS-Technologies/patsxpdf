@@ -127,7 +127,7 @@ export function UserProfileDialog({ onClose }: { onClose: () => void }) {
     return () => { active = false; };
   }, [t]);
 
-  if (error) return <div className="modal-backdrop" onMouseDown={onClose}><section className="modal user-modal" onMouseDown={(event) => event.stopPropagation()}><header><h2>{t("menu.profile")}</h2><button className="icon-button" title={t("common.close")} onClick={onClose}><X size={18} /></button></header><p className="form-error">{error}</p></section></div>;
+  if (error) return <div className="modal-backdrop" onMouseDown={onClose}><section className="modal user-modal" onMouseDown={(event) => event.stopPropagation()}><header><h2>{t("menu.avatar.profile")}</h2><button className="icon-button" title={t("common.close")} onClick={onClose}><X size={18} /></button></header><p className="form-error">{error}</p></section></div>;
   if (!user) return null;
   return <UserDialog user={user} roles={user.roles} self endpoint="/api/users/me" onClose={onClose} onSaved={async (preferredLocale) => { await setLocale(preferredLocale, false); onClose(); }} />;
 }

@@ -71,17 +71,36 @@ function Menu({ label, children }: { label: string; children: ReactNode }) {
   return <details className="menu" onToggle={(event) => {
     if (!event.currentTarget.open) return;
     closeOpenMenus(event.currentTarget);
-  }}><summary>{label}<ChevronDown size={12} /></summary><div className="menu-popover">{children}</div></details>;
+  }}><summary
+    onMouseDown={(event) => event.preventDefault()}
+    onClick={(event) => {
+      event.preventDefault();
+      const menu = event.currentTarget.parentElement as HTMLDetailsElement;
+      menu.open = !menu.open;
+    }}
+  >{label}<ChevronDown size={12} /></summary><div className="menu-popover">{children}</div></details>;
 }
 
-function MenuItem({ children, disabled, onClick }: { children: ReactNode; disabled?: boolean; onClick: () => void }) {
-  return <button disabled={disabled} onClick={(event) => { onClick(); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{children}</button>;
+function MenuItem({ children, checked, disabled, onClick, shortcut }: { children: ReactNode; checked?: boolean; disabled?: boolean; onClick?: () => void; shortcut?: string }) {
+  return <button
+    disabled={disabled || !onClick}
+    onMouseDown={(event) => event.preventDefault()}
+    onClick={(event) => {
+      onClick?.();
+      event.currentTarget.closest("details")?.removeAttribute("open");
+    }}
+  >
+    {checked !== undefined && <span className="menu-check" aria-hidden="true">{checked ? "✓" : ""}</span>}
+    <span className="menu-item-label">{children}</span>
+    {shortcut && <kbd>{shortcut}</kbd>}
+  </button>;
 }
 
 export default function Workbench({ user }: { user: SessionUser }) {
   const router = useRouter();
   const { locale, t, formatDate, formatNumber } = useI18n();
   const inputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [openPdfs, setOpenPdfs] = useState<OpenPdf[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [modal, setModal] = useState<Modal>(null);
@@ -91,8 +110,10 @@ export default function Workbench({ user }: { user: SessionUser }) {
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState<SearchOptions>({ query: "", wholeWord: false, caseSensitive: false, current: 0 });
   const [matches, setMatches] = useState<{ page: number; text: string }[]>([]);
+  const [selectedPdfText, setSelectedPdfText] = useState("");
   const [tool, setTool] = useState("select");
   const [annotationColor, setAnnotationColor] = useState("#f5d90a");
   const [view, setView] = useState<"viewer" | "params" | "users" | "conversions">("viewer");
@@ -158,7 +179,7 @@ export default function Workbench({ user }: { user: SessionUser }) {
     if (activeId) setOpenPdfs((current) => current.map((item) => item.id === activeId ? { ...item, ...values } : item));
   }
 
-  function closeDocument(id = activeId) {
+  const closeDocument = useCallback((id = activeId) => {
     if (!id) return;
     const index = openPdfs.findIndex((item) => item.id === id);
     const remaining = openPdfs.filter((item) => item.id !== id);
@@ -168,7 +189,19 @@ export default function Workbench({ user }: { user: SessionUser }) {
       setProcessing(Boolean(nextId));
       setActiveId(nextId);
     }
-  }
+  }, [activeId, openPdfs]);
+
+  const closeAllDocuments = useCallback(() => {
+    if (!openPdfs.length || !confirm(t("question.confirmCloseAll"))) return;
+    setOpenPdfs([]);
+    setActiveId(null);
+    setProcessing(false);
+  }, [openPdfs.length, t]);
+
+  const closeOtherDocuments = useCallback(() => {
+    if (!active) return;
+    setOpenPdfs([active]);
+  }, [active]);
 
   async function upload(file?: File) {
     if (!file) return;
@@ -211,11 +244,39 @@ export default function Workbench({ user }: { user: SessionUser }) {
     }
   }
 
-  function goMatch(index: number) {
+  const goMatch = useCallback((index: number) => {
     if (!matches.length) return;
     const next = Math.max(0, Math.min(matches.length - 1, index));
-    setSearch((value) => ({ ...value, current: next })); updateActive({ page: matches[next].page });
+    setSearch((value) => ({ ...value, current: next }));
+    setOpenPdfs((current) => current.map((item) => item.id === activeId ? { ...item, page: matches[next].page } : item));
+  }, [activeId, matches]);
+
+  function closeSearch() {
+    setSearchOpen(false);
+    setSearch((value) => ({ ...value, query: "", current: 0 }));
+    setMatches([]);
   }
+
+  const openCurrentSearch = useCallback(() => {
+    if (!activeId) return;
+    setView("viewer");
+    setSearchOpen(true);
+  }, [activeId]);
+
+  const clearPdfSelection = useCallback(() => {
+    document.getSelection()?.removeAllRanges();
+    setSelectedPdfText("");
+  }, []);
+
+  const copyPdfSelection = useCallback(async () => {
+    if (!selectedPdfText) return;
+    try {
+      await navigator.clipboard.writeText(selectedPdfText);
+    } catch (error) {
+      console.error("Unable to copy selected PDF text.", error);
+      window.alert(t("menu.copyFailed"));
+    }
+  }, [selectedPdfText, t]);
 
   function fitZoom(mode: "height" | "width" | "page") {
     if (!active) return;
@@ -272,6 +333,46 @@ export default function Workbench({ user }: { user: SessionUser }) {
     return () => document.removeEventListener("keydown", handleViewerKeys);
   }, [activeId, modal, profileOpen, view]);
 
+  useEffect(() => {
+    if (modal || profileOpen) return;
+    const annotationColors = ["#f5d90a", "#e86f12", "#26c6da", "#3478f6", "#8b8f97", "#ef77ad", "#e5484d"];
+    function handleMenuShortcut(event: KeyboardEvent) {
+      const key = event.key.toLowerCase();
+      let handled = true;
+
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && key === "c" && selectedPdfText) void copyPdfSelection();
+      else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "o") setModal("upload");
+      else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "o") setModal("library");
+      else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "c" && selectedPdfText) clearPdfSelection();
+      else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "c") setView("conversions");
+      else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "f4" && openPdfs.length) closeAllDocuments();
+      else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "f4" && active) closeOtherDocuments();
+      else if (!event.ctrlKey && !event.altKey && !event.shiftKey && key === "f4" && active) closeDocument();
+      else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "f" && active) openCurrentSearch();
+      else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "w" && active) setSearch((value) => ({ ...value, wholeWord: !value.wholeWord }));
+      else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "m" && active) setSearch((value) => ({ ...value, caseSensitive: !value.caseSensitive }));
+      else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "f2" && matches.length) goMatch(0);
+      else if (!event.ctrlKey && !event.altKey && !event.shiftKey && key === "f2" && matches.length) goMatch(search.current - 1);
+      else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "f3" && matches.length) goMatch(matches.length - 1);
+      else if (!event.ctrlKey && !event.altKey && !event.shiftKey && key === "f3" && matches.length) goMatch(search.current + 1);
+      else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "t" && active) setTool("note");
+      else if (event.altKey && !event.ctrlKey && !event.shiftKey && /^[1-7]$/.test(key) && active) setAnnotationColor(annotationColors[Number(key) - 1]);
+      else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "w" && openPdfs.length) setModal("windows");
+      else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "f1") setModal("help");
+      else handled = false;
+
+      if (handled) event.preventDefault();
+    }
+    document.addEventListener("keydown", handleMenuShortcut);
+    return () => document.removeEventListener("keydown", handleMenuShortcut);
+  }, [active, clearPdfSelection, closeAllDocuments, closeDocument, closeOtherDocuments, copyPdfSelection, goMatch, matches, modal, openCurrentSearch, openPdfs, profileOpen, search, selectedPdfText]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  }, [searchOpen]);
+
   return (
     <main className={`workbench ${view === "viewer" ? "" : "administration-view"}`}>
       {/* Top bar */}
@@ -282,25 +383,84 @@ export default function Workbench({ user }: { user: SessionUser }) {
         <nav className="menu-bar">
           {/* File */}
           <Menu label={t("menu.file")}>
-            <MenuItem onClick={() => setModal("upload")}><FilePlus2 size={15} />{t("menu.upload")}</MenuItem>
-            <MenuItem onClick={() => setModal("library")}><FolderOpen size={15} />{t("menu.open")}</MenuItem><span className="menu-separator" />
-            <MenuItem onClick={() => setView("conversions")}><ListChecks size={15} />{t("menu.conversions")}</MenuItem>
-            <MenuItem disabled={!active} onClick={() => closeDocument()}>{t("common.close")}</MenuItem>
-            <MenuItem disabled={!openPdfs.length} onClick={() => { if (confirm(t("menu.confirmCloseAll"))) { setOpenPdfs([]); setActiveId(null); setProcessing(false); } }}>{t("menu.closeAll")}</MenuItem><span className="menu-separator" />
-            <MenuItem onClick={logout}><LogOut size={15} />{t("menu.logout")}</MenuItem>
+            <MenuItem shortcut="Ctrl+O" onClick={() => setModal("upload")}><FilePlus2 size={15} />{t("menu.file.upload")}</MenuItem>
+            <MenuItem shortcut="Alt+O" onClick={() => setModal("library")}><FolderOpen size={15} />{t("menu.file.open")}</MenuItem>
+            <MenuItem shortcut="Alt+C" onClick={() => setView("conversions")}><ListChecks size={15} />{t("menu.file.conversions")}</MenuItem>
+            <span className="menu-separator" />
+            <MenuItem shortcut="F4" disabled={!active} onClick={() => closeDocument()}>{t("common.close")}</MenuItem>
+            <MenuItem shortcut="Alt+F4" disabled={!openPdfs.length} onClick={closeAllDocuments}>{t("menu.file.closeAll")}</MenuItem>
+            <MenuItem shortcut="Ctrl+F4" disabled={!active || openPdfs.length < 2} onClick={closeOtherDocuments}>{t("menu.file.closeOthers")}</MenuItem>
+            <span className="menu-separator" />
+            <MenuItem shortcut="Ctrl+D" disabled={!active}>{t("menu.file.download")}</MenuItem>
+            <span className="menu-separator" />
+            <MenuItem onClick={logout}><LogOut size={15} />{t("common.exit")}</MenuItem>
           </Menu>
           {/* Edit */}
-          <Menu label={t("menu.edit")}><MenuItem disabled={!active} onClick={() => setTool("select")}>{t("menu.select")}</MenuItem><MenuItem disabled={!active} onClick={() => setTool("highlight")}>{t("menu.newAnnotation")}</MenuItem></Menu>
+          <Menu label={t("menu.edit")}>
+            <MenuItem shortcut="Ctrl+C" disabled={!selectedPdfText} onClick={() => void copyPdfSelection()}>{t("menu.copy")}</MenuItem>
+            <MenuItem shortcut="Alt+C" disabled={!selectedPdfText} onClick={clearPdfSelection}>{t("menu.deselect")}</MenuItem>
+          </Menu>
+          {/* Search */}
+          <Menu label={t("menu.search")}>
+            <MenuItem shortcut="Ctrl+F" disabled={!active} onClick={openCurrentSearch}>{t("menu.search.current")}</MenuItem>
+            <MenuItem shortcut="Shift+Ctrl+F">{t("menu.search.allOpen")}</MenuItem>
+            <MenuItem shortcut="Alt+F">{t("menu.search.library")}</MenuItem>
+            <span className="menu-separator" />
+            <MenuItem shortcut="Alt+W" disabled={!active} onClick={() => setSearch({ ...search, wholeWord: !search.wholeWord })}>{search.wholeWord ? t("viewer.wholeWord") : t("viewer.partialWord")}</MenuItem>
+            <MenuItem shortcut="Alt+M" disabled={!active} onClick={() => setSearch({ ...search, caseSensitive: !search.caseSensitive })}>{search.caseSensitive ? t("viewer.matchCase") : t("viewer.ignoreCase")}</MenuItem>
+            <span className="menu-separator" />
+            <MenuItem shortcut="Ctrl+F2" disabled={!matches.length} onClick={() => goMatch(0)}>{t("viewer.firstMatch")}</MenuItem>
+            <MenuItem shortcut="F2" disabled={!matches.length} onClick={() => goMatch(search.current - 1)}>{t("viewer.previousMatch")}</MenuItem>
+            <MenuItem shortcut="F3" disabled={!matches.length} onClick={() => goMatch(search.current + 1)}>{t("viewer.nextMatch")}</MenuItem>
+            <MenuItem shortcut="Ctrl+F3" disabled={!matches.length} onClick={() => goMatch(matches.length - 1)}>{t("viewer.lastMatch")}</MenuItem>
+          </Menu>
+          {/* Annotations */}
+          <Menu label={t("menu.annotations")}>
+            <MenuItem shortcut="Alt+T" disabled={!active} onClick={() => setTool("note")}>{t("menu.annotations.text")}</MenuItem>
+            <MenuItem disabled={!active} onClick={() => setTool("circle")}>{t("menu.annotations.circle")}</MenuItem>
+            <MenuItem disabled={!active} onClick={() => setTool("rectangle")}>{t("menu.annotations.rectangle")}</MenuItem>
+            <MenuItem disabled={!active} onClick={() => setTool("freehand")}>{t("menu.annotations.freehand")}</MenuItem>
+            <MenuItem disabled={!active} onClick={() => setTool("highlight")}>{t("viewer.highlight")}</MenuItem>
+            <span className="menu-separator" />
+            {[
+              ["#f5d90a", "menu.color.yellow", "Alt+1"],
+              ["#e86f12", "menu.color.orange", "Alt+2"],
+              ["#26c6da", "menu.color.cyan", "Alt+3"],
+              ["#3478f6", "menu.color.blue", "Alt+4"],
+              ["#8b8f97", "menu.color.gray", "Alt+5"],
+              ["#ef77ad", "menu.color.pink", "Alt+6"],
+              ["#e5484d", "menu.color.red", "Alt+7"],
+            ].map(([color, label, shortcut]) => <MenuItem key={color} checked={annotationColor === color} shortcut={shortcut} disabled={!active} onClick={() => setAnnotationColor(color)}>{t(label as TranslationKey)}</MenuItem>)}
+            <span className="menu-separator" />
+            <MenuItem shortcut="Ctrl+Del">{t("menu.annotations.delete")}</MenuItem>
+          </Menu>
+          {/* Extract */}
+          <Menu label={t("menu.extract")}>
+            <MenuItem shortcut="Ctrl+E">{t("menu.extract.page")}</MenuItem>
+            <MenuItem shortcut="Alt+E">{t("menu.extract.pages")}</MenuItem>
+            <MenuItem shortcut="Ctrl+Alt+E">{t("menu.extract.ocr")}</MenuItem>
+          </Menu>
+          {/* Compare */}
+          <Menu label={t("menu.compare")}>
+            <MenuItem shortcut="F7">{t("menu.compare.markFirst")}</MenuItem>
+            <MenuItem shortcut="F8">{t("menu.compare.run")}</MenuItem>
+            <MenuItem shortcut="F9">{t("menu.compare.clear")}</MenuItem>
+          </Menu>
           {/* Window */}
           <Menu label={t("menu.window")}>
-            {openPdfs.slice(0, 20).map((item) => <MenuItem key={item.id} onClick={() => activateDocument(item.id)}>{item.id === activeId ? "✓ " : ""}{item.original_name}</MenuItem>)}
-            {!openPdfs.length && <span className="menu-empty">{t("menu.noPdf")}</span>}
-            {openPdfs.length > 20 && <MenuItem onClick={() => setModal("windows")}>{t("menu.more")}</MenuItem>}
+            <MenuItem shortcut="Ctrl+W" disabled={!openPdfs.length} onClick={() => setModal("windows")}>{t("viewer.openWindows")}</MenuItem>
+            <span className="menu-separator" />
+            {openPdfs.slice(0, 20).map((item) => <MenuItem key={item.id} checked={item.id === activeId} onClick={() => activateDocument(item.id)}>{item.original_name}</MenuItem>)}
+            {!openPdfs.length && <span className="menu-empty">{t("menu.window.noPdf")}</span>}
+            {openPdfs.length > 20 && <MenuItem onClick={() => setModal("windows")}>{t("menu.window.more")}</MenuItem>}
           </Menu>
           {/* Settings */}
           <Menu label={t("common.settings")}><MenuItem onClick={() => setView("params")}>{t("menu.parameters")}</MenuItem><MenuItem onClick={() => setView("users")}>{t("menu.users")}</MenuItem></Menu>
           {/* Help */}
-          <Menu label={t("menu.help")}><MenuItem onClick={() => setModal("help")}>{t("menu.about")}</MenuItem></Menu>
+          <Menu label={t("menu.help")}>
+            <MenuItem shortcut="F1">{t("menu.help.page")}</MenuItem>
+            <MenuItem shortcut="Ctrl+F1" onClick={() => setModal("help")}>{t("menu.about")}</MenuItem>
+          </Menu>
         </nav>
         <div className="user-area">
           <span className="locale-flag" role="img" aria-label={t(`language.${locale}` as TranslationKey)} title={t(`language.${locale}` as TranslationKey)}>{localeFlags[locale]}</span>
@@ -308,9 +468,9 @@ export default function Workbench({ user }: { user: SessionUser }) {
           <details className="user-menu menu" onToggle={(event) => { if (event.currentTarget.open) closeOpenMenus(event.currentTarget); }}>
             <summary className="user-avatar" title={user.name} aria-label={`Menu de ${user.name}`}>{user.initials}</summary>
             <div className="menu-popover">
-              <MenuItem onClick={() => setProfileOpen(true)}><UserRound size={15} />{t("menu.profile")}</MenuItem>
+              <MenuItem onClick={() => setProfileOpen(true)}><UserRound size={15} />{t("menu.avatar.profile")}</MenuItem>
               <span className="menu-separator" />
-              <MenuItem onClick={logout}><LogOut size={15} />{t("menu.logout")}</MenuItem>
+              <MenuItem onClick={logout}><LogOut size={15} />{t("common.exit")}</MenuItem>
             </div>
           </details>
         </div>
@@ -351,59 +511,10 @@ export default function Workbench({ user }: { user: SessionUser }) {
           </button>
           <span className="page-total">({t("viewer.pages", { count: formatNumber(active?.page_count ?? 0) })})</span>
         </div>
-        {/* Toolbar for PDF search */}
-        <div className="search-group">
-          <Search size={15} />
-          <input 
-            placeholder={t("viewer.search")}
-            disabled={!active} 
-            value={search.query} 
-            onChange={(event) => setSearch({ ...search, query: event.target.value, current: 0 })} 
-          />
-          <button 
-            className="word-kind"
-            title={search.wholeWord ? t("viewer.wholeWord") : t("viewer.partialWord")}
-            disabled={!active} 
-            onClick={() => setSearch({ ...search, wholeWord: !search.wholeWord })}>
-              {search.wholeWord ? '  abc  ' : '*abc*' }
+        <div className="tool-group">
+          <button className={searchOpen ? "active" : ""} title={t("viewer.searchInDoc")} disabled={!active} onClick={() => setSearchOpen(true)}>
+            <Search size={16} />
           </button>
-          <button 
-            className="case-kind"
-            title={search.caseSensitive ? t("viewer.matchCase") : t("viewer.ignoreCase")}
-            disabled={!active} 
-            onClick={() => setSearch({ ...search, caseSensitive: !search.caseSensitive })}>
-              {search.caseSensitive ? 'ABC' : 'Abc' }
-            </button>
-            <span
-              title={t("viewer.matches")}
-              style={{ cursor: "default" }}
-            >
-              {matches.length ? `${search.current + 1}/${matches.length}` : "0/0"}
-            </span>
-          <button 
-            title={t("viewer.firstMatch")}
-            disabled={!matches.length} 
-            onClick={() => goMatch(0)}>
-              <ArrowLeftToLine size={15} />
-          </button>
-          <button 
-            title={t("viewer.previousMatch")}
-            disabled={!matches.length} 
-            onClick={() => goMatch(search.current - 1)}>
-              <ArrowLeft size={15} />
-            </button>
-            <button 
-              title={t("viewer.nextMatch")}
-              disabled={!matches.length} 
-              onClick={() => goMatch(search.current + 1)}>
-                <ArrowRight size={15} />
-            </button>
-            <button 
-              title={t("viewer.lastMatch")}
-              disabled={!matches.length} 
-              onClick={() => goMatch(matches.length - 1)}>
-                <ArrowRightToLine size={15} />
-            </button>
         </div>
         {/* Annotation controls */}
         <div className="tool-group annotation-tools">
@@ -412,23 +523,67 @@ export default function Workbench({ user }: { user: SessionUser }) {
           <button className={tool === "rectangle" ? "active" : ""} title={t("viewer.rectangle")} disabled={!active} onClick={() => setTool("rectangle")}><RectangleHorizontal size={16} /></button>
           <button className={tool === "freehand" ? "active" : ""} title={t("viewer.freehand")} disabled={!active} onClick={() => setTool("freehand")}><Pencil size={16} /></button>
           <button className={tool === "highlight" ? "active" : ""} title={t("viewer.highlight")} disabled={!active} onClick={() => setTool("highlight")}><Highlighter size={16} /></button>
-          <div className="color-picker" title={t("viewer.annotationColor")}>{["#f5d90a", "#8f3f0b", "#26c6da", "#3478f6", "#8b8f97", "#ef77ad", "#e5484d"].map((color) => <button key={color} aria-label={t("viewer.color", { color })} className={annotationColor === color ? "selected" : ""} style={{ backgroundColor: color }} onClick={() => setAnnotationColor(color)} />)}</div>
+          <div className="color-picker" title={t("viewer.annotationColor")}>{["#f5d90a", "#e86f12", "#26c6da", "#3478f6", "#8b8f97", "#ef77ad", "#e5484d"].map((color) => <button key={color} aria-label={t("viewer.color", { color })} className={annotationColor === color ? "selected" : ""} style={{ backgroundColor: color }} onClick={() => setAnnotationColor(color)} />)}</div>
+        </div>
+        <div className="tool-group view-tools" aria-label={t("viewer.viewControls")}>
+          <button title={t("viewer.zoomOut")} disabled={!active} onClick={() => updateActive({ zoom: Math.max(5, active!.zoom - 10) })}><ZoomOut size={16} /></button>
+          <input className="zoom-input" aria-label={t("viewer.zoom")} disabled={!active} value={active ? `${active.zoom}%` : ""} onChange={(event) => updateActive({ zoom: Math.min(500, Math.max(5, Number(event.target.value.replace("%", "")))) })} />
+          <button title={t("viewer.zoomIn")} disabled={!active} onClick={() => updateActive({ zoom: Math.min(500, active!.zoom + 10) })}><ZoomIn size={16} /></button>
+          <button title={t("viewer.fitHeight")} disabled={!active} onClick={() => fitZoom("height")}><MoveVertical size={16} /></button>
+          <button title={t("viewer.fitWidth")} disabled={!active} onClick={() => fitZoom("width")}><MoveHorizontal size={16} /></button>
+          <button title={t("viewer.fitPage")} disabled={!active} onClick={() => fitZoom("page")}><LucideFile size={16} /></button>
+          <button title={t("viewer.rotateLeft")} disabled={!active} onClick={() => updateActive({ rotation: active!.rotation - 90 })}><RotateCcw size={16} /></button>
+          <button title={t("viewer.rotateRight")} disabled={!active} onClick={() => updateActive({ rotation: active!.rotation + 90 })}><RotateCw size={16} /></button>
         </div>
       </section>
 
       {/* Document tabs */}
-      <div className="document-tabs">{
-        openPdfs.map((item) => 
-          <button 
-            className={item.id === activeId ? "active" : ""} 
-            key={item.id} 
-            onClick={() => activateDocument(item.id)}>
-            <span>{item.original_name}</span>
-            <X 
-              size={14} 
-              onClick={(event) => { event.stopPropagation(); closeDocument(item.id); }} 
-            />
-          </button>)}
+      <div className="document-tabs-row">
+        <div className="document-tabs">{
+          openPdfs.map((item) =>
+            <button
+              className={item.id === activeId ? "active" : ""}
+              key={item.id}
+              onClick={() => activateDocument(item.id)}>
+              <span>{item.original_name}</span>
+              <X
+                size={14}
+                onClick={(event) => { event.stopPropagation(); closeDocument(item.id); }}
+              />
+            </button>)}
+        </div>
+        {searchOpen && <div className="floating-search" role="search" aria-label={t("viewer.searchInDoc")}>
+          <Search size={15} aria-hidden="true" />
+          <input
+            ref={searchInputRef}
+            placeholder={t("viewer.searchInDoc")}
+            disabled={!active}
+            value={search.query}
+            onChange={(event) => setSearch({ ...search, query: event.target.value, current: 0 })}
+          />
+          <button
+            className="word-kind"
+            title={search.wholeWord ? t("viewer.wholeWord") : t("viewer.partialWord")}
+            disabled={!active}
+            onClick={() => setSearch({ ...search, wholeWord: !search.wholeWord })}>
+              {search.wholeWord ? "abc" : "*abc*"}
+          </button>
+          <button
+            className="case-kind"
+            title={search.caseSensitive ? t("viewer.matchCase") : t("viewer.ignoreCase")}
+            disabled={!active}
+            onClick={() => setSearch({ ...search, caseSensitive: !search.caseSensitive })}>
+              {search.caseSensitive ? "ABC" : "Abc"}
+          </button>
+          <span title={t("viewer.matches")}>
+            {matches.length ? `${search.current + 1}/${matches.length}` : "0/0"}
+          </span>
+          <button title={t("viewer.firstMatch")} disabled={!matches.length} onClick={() => goMatch(0)}><ArrowLeftToLine size={15} /></button>
+          <button title={t("viewer.previousMatch")} disabled={!matches.length} onClick={() => goMatch(search.current - 1)}><ArrowLeft size={15} /></button>
+          <button title={t("viewer.nextMatch")} disabled={!matches.length} onClick={() => goMatch(search.current + 1)}><ArrowRight size={15} /></button>
+          <button title={t("viewer.lastMatch")} disabled={!matches.length} onClick={() => goMatch(matches.length - 1)}><ArrowRightToLine size={15} /></button>
+          <button className="close-search" title={t("common.close")} aria-label={t("common.close")} onClick={closeSearch}><X size={16} /></button>
+        </div>}
       </div>
           </>}
 
@@ -453,7 +608,8 @@ export default function Workbench({ user }: { user: SessionUser }) {
               onMatches={setMatches} 
               onLoad={(pages) => updateActive({ page_count: pages })}
               onReady={() => setProcessing(false)}
-              onLoadError={() => setProcessing(false)} />
+              onLoadError={() => setProcessing(false)}
+              onTextSelectionChange={setSelectedPdfText} />
           : <div className="empty-state">
               <div className="empty-icon">
                 <FolderOpen size={38} />
@@ -475,25 +631,6 @@ export default function Workbench({ user }: { user: SessionUser }) {
             </div>
           }
       </section>
-
-      {view === "viewer" && <>
-      {/* Footer with controls for zoom & rotation */}
-      <footer className="app-footer" aria-label={t("viewer.viewControls")}>
-
-        {/* Zoom controls */}
-        <button title={t("viewer.zoomOut")} disabled={!active} onClick={() => updateActive({ zoom: Math.max(5, active!.zoom - 10) })}><ZoomOut size={16} /></button>
-        <input className="zoom-input" aria-label={t("viewer.zoom")} disabled={!active} value={active ? `${active.zoom}%` : ""} onChange={(event) => updateActive({ zoom: Math.min(500, Math.max(5, Number(event.target.value.replace("%", "")))) })} />
-        <button title={t("viewer.zoomIn")} disabled={!active} onClick={() => updateActive({ zoom: Math.min(500, active!.zoom + 10) })}><ZoomIn size={16} /></button>
-        <button title={t("viewer.fitHeight")} disabled={!active} onClick={() => fitZoom("height")}><MoveVertical size={16} /></button>
-        <button title={t("viewer.fitWidth")} disabled={!active} onClick={() => fitZoom("width")}><MoveHorizontal size={16} /></button>
-        <button title={t("viewer.fitPage")} disabled={!active} onClick={() => fitZoom("page")}><LucideFile size={16} /></button>
-        <span className="footer-separator" />
-
-        {/* Rotation controls */}
-        <button title={t("viewer.rotateLeft")} disabled={!active} onClick={() => updateActive({ rotation: active!.rotation - 90 })}><RotateCcw size={16} /></button>
-        <button title={t("viewer.rotateRight")} disabled={!active} onClick={() => updateActive({ rotation: active!.rotation + 90 })}><RotateCw size={16} /></button>
-      </footer>
-      </>}
 
       {/* User profile dialog */}
       {profileOpen && <UserProfileDialog onClose={() => setProfileOpen(false)} />}

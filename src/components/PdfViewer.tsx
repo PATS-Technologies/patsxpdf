@@ -18,6 +18,7 @@ interface Props {
   onReady: () => void;
   onLoadError: () => void;
   onMatches: (matches: { page: number; text: string }[]) => void;
+  onTextSelectionChange: (text: string) => void;
 }
 
 function escapeRegExp(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
@@ -27,7 +28,7 @@ interface Annotation { id: string; page: number; kind: "highlight" | "note" | "c
 type HistoryEntry = { type: "create"; annotation: Annotation } | { type: "delete"; annotation: Annotation } | { type: "move"; id: string; before: Geometry; after: Geometry };
 interface NoteDrag { id: string; pointerId: number; startX: number; startY: number; before: Geometry; current: Geometry; moved: boolean; }
 
-export default function PdfViewer({ documentId, page, zoom, rotation, search, tool, color, onLoad, onReady, onLoadError, onMatches }: Props) {
+export default function PdfViewer({ documentId, page, zoom, rotation, search, tool, color, onLoad, onReady, onLoadError, onMatches, onTextSelectionChange }: Props) {
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
@@ -44,6 +45,31 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
   const undoingRef = useRef(false);
 
   useEffect(() => { annotationsRef.current = annotations; }, [annotations]);
+
+  useEffect(() => {
+    function handleSelectionChange() {
+      const selection = document.getSelection();
+      const container = containerRef.current;
+      const anchor = selection?.anchorNode;
+      const focus = selection?.focusNode;
+      const isPdfSelection = Boolean(
+        selection &&
+        !selection.isCollapsed &&
+        container &&
+        anchor &&
+        focus &&
+        container.contains(anchor) &&
+        container.contains(focus) &&
+        (anchor.parentElement?.closest(".react-pdf__Page__textContent") || focus.parentElement?.closest(".react-pdf__Page__textContent")),
+      );
+      onTextSelectionChange(isPdfSelection ? selection!.toString() : "");
+    }
+    document.addEventListener("selectionchange", handleSelectionChange);
+    return () => {
+      document.removeEventListener("selectionchange", handleSelectionChange);
+      onTextSelectionChange("");
+    };
+  }, [onTextSelectionChange]);
 
   useEffect(() => {
     let activeRequest = true;
@@ -112,6 +138,12 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
   function point(event: PointerEvent<HTMLDivElement>) {
     const bounds = event.currentTarget.getBoundingClientRect();
     return { x: (event.clientX - bounds.left) / bounds.width, y: (event.clientY - bounds.top) / bounds.height };
+  }
+
+  function clearPreviousTextSelection(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !(event.target instanceof Element) || !event.target.closest(".react-pdf__Page__textContent")) return;
+    const selection = document.getSelection();
+    if (selection && !selection.isCollapsed) selection.removeAllRanges();
   }
 
   function startAnnotation(event: PointerEvent<HTMLDivElement>, pageNumber: number) {
@@ -237,7 +269,7 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
   }
 
   return (
-    <div className="pdf-scroll" ref={containerRef}>
+    <div className="pdf-scroll" ref={containerRef} onPointerDown={clearPreviousTextSelection}>
       <Document file={`/api/documents/${documentId}/file`} loading={<div className="viewer-message">{t("pdf.loading")}</div>} error={<div className="viewer-message error">{t("pdf.loadError")}</div>} onLoadSuccess={(loaded) => { setPdf(loaded); onLoad(loaded.numPages, loaded); }} onLoadError={onLoadError}>
         {pdf && (
           <div className="pdf-page" data-page-number={page} key={page}>
