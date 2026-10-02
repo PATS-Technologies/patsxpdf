@@ -4,6 +4,7 @@ import { PointerEvent, useEffect, useRef, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { MessageSquareText, Trash2 } from "lucide-react";
+import { useI18n } from "@/components/I18nProvider";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
 
@@ -14,6 +15,8 @@ interface Props {
   documentId: string; page: number; zoom: number; rotation: number; search: SearchOptions;
   tool: string; color: string;
   onLoad: (pages: number, pdf: PDFDocumentProxy) => void;
+  onReady: () => void;
+  onLoadError: () => void;
   onMatches: (matches: { page: number; text: string }[]) => void;
 }
 
@@ -24,7 +27,8 @@ interface Annotation { id: string; page: number; kind: "highlight" | "note" | "c
 type HistoryEntry = { type: "create"; annotation: Annotation } | { type: "delete"; annotation: Annotation } | { type: "move"; id: string; before: Geometry; after: Geometry };
 interface NoteDrag { id: string; pointerId: number; startX: number; startY: number; before: Geometry; current: Geometry; moved: boolean; }
 
-export default function PdfViewer({ documentId, page, zoom, rotation, search, tool, color, onLoad, onMatches }: Props) {
+export default function PdfViewer({ documentId, page, zoom, rotation, search, tool, color, onLoad, onReady, onLoadError, onMatches }: Props) {
+  const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -229,24 +233,24 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
 
   function deleteButton(annotation: Annotation, pageAnchored = false) {
     const style = pageAnchored ? { left: `${annotation.geometry.x * 100}%`, top: `${annotation.geometry.y * 100}%` } : undefined;
-    return selectedId === annotation.id && <button className="annotation-delete" style={style} title="Remover anotação" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); void removeAnnotation(annotation.id); }}><Trash2 size={13} /></button>;
+    return selectedId === annotation.id && <button className="annotation-delete" style={style} title={t("pdf.removeAnnotation")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); void removeAnnotation(annotation.id); }}><Trash2 size={13} /></button>;
   }
 
   return (
     <div className="pdf-scroll" ref={containerRef}>
-      <Document file={`/api/documents/${documentId}/file`} loading={<div className="viewer-message">Carregando PDF...</div>} error={<div className="viewer-message error">Não foi possível carregar este PDF.</div>} onLoadSuccess={(loaded) => { setPdf(loaded); onLoad(loaded.numPages, loaded); }}>
-        {pdf && Array.from({ length: pdf.numPages }, (_, index) => (
-          <div className="pdf-page" data-page-number={index + 1} key={index + 1}>
-            <span className="page-badge">{index + 1}</span>
-            <Page pageNumber={index + 1} scale={zoom / 100} rotate={rotation} renderAnnotationLayer renderTextLayer customTextRenderer={highlight} />
-            <div className={`drawing-layer ${tool !== "select" ? "drawing" : ""}`} onPointerDown={(event) => startAnnotation(event, index + 1)} onPointerMove={(event) => { if (draft?.page === index + 1) { const current = point(event); setDraft({ ...draft, currentX: current.x, currentY: current.y, points: tool === "freehand" ? [...draft.points, current] : draft.points }); } }} onPointerUp={(event) => void finishAnnotation(event)}>
-              {annotations.filter((annotation) => annotation.page === index + 1).map((annotation) => annotation.kind === "freehand" ? <div className="annotation-freehand" key={annotation.id}>{stroke(annotation)}{deleteButton(annotation, true)}</div> : <div key={annotation.id} className={`annotation annotation-${annotation.kind} ${selectedId === annotation.id ? "selected" : ""}`} style={annotationStyle(annotation)} onPointerDown={(event) => { if (tool === "select") { event.stopPropagation(); setSelectedId(annotation.id); } }}>{annotation.kind === "note" && <button className="note-pin" title={tool === "select" ? "Mover anotação" : "Exibir/esconder anotação"} onPointerDown={(event) => startNoteDrag(event, annotation)} onPointerMove={moveNote} onPointerUp={(event) => void finishNoteDrag(event, annotation)}><MessageSquareText size={14} /></button>}{deleteButton(annotation)}{annotation.kind === "note" && openNote === annotation.id && <div className="note-content">{annotation.content}</div>}</div>)}
-              {draft?.page === index + 1 && (tool === "freehand" ? stroke({ id: "draft", page: draft.page, kind: "freehand", color, geometry: { x: 0, y: 0, w: 1, h: 1, points: draft.points } }) : <div className={`annotation annotation-${tool} draft`} style={annotationStyle({ id: "draft", page: draft.page, kind: tool as Annotation["kind"], color, geometry: { x: Math.min(draft.x, draft.currentX), y: Math.min(draft.y, draft.currentY), w: Math.abs(draft.currentX - draft.x), h: Math.abs(draft.currentY - draft.y) } })} />)}
+      <Document file={`/api/documents/${documentId}/file`} loading={<div className="viewer-message">{t("pdf.loading")}</div>} error={<div className="viewer-message error">{t("pdf.loadError")}</div>} onLoadSuccess={(loaded) => { setPdf(loaded); onLoad(loaded.numPages, loaded); }} onLoadError={onLoadError}>
+        {pdf && (
+          <div className="pdf-page" data-page-number={page} key={page}>
+            <span className="page-badge">{page}</span>
+            <Page pageNumber={page} scale={zoom / 100} rotate={rotation} renderAnnotationLayer renderTextLayer customTextRenderer={highlight} onRenderSuccess={onReady} onRenderError={onLoadError} />
+            <div className={`drawing-layer ${tool !== "select" ? `drawing tool-${tool}` : ""}`} onPointerDown={(event) => startAnnotation(event, page)} onPointerMove={(event) => { if (draft?.page === page) { const current = point(event); setDraft({ ...draft, currentX: current.x, currentY: current.y, points: tool === "freehand" ? [...draft.points, current] : draft.points }); } }} onPointerUp={(event) => void finishAnnotation(event)}>
+              {annotations.filter((annotation) => annotation.page === page).map((annotation) => annotation.kind === "freehand" ? <div className="annotation-freehand" key={annotation.id}>{stroke(annotation)}{deleteButton(annotation, true)}</div> : <div key={annotation.id} className={`annotation annotation-${annotation.kind} ${selectedId === annotation.id ? "selected" : ""}`} style={annotationStyle(annotation)} onPointerDown={(event) => { if (tool === "select") { event.stopPropagation(); setSelectedId(annotation.id); } }}>{annotation.kind === "note" && <button className="note-pin" title={tool === "select" ? t("pdf.moveAnnotation") : t("pdf.toggleAnnotation")} onPointerDown={(event) => startNoteDrag(event, annotation)} onPointerMove={moveNote} onPointerUp={(event) => void finishNoteDrag(event, annotation)}><MessageSquareText size={14} /></button>}{deleteButton(annotation)}{annotation.kind === "note" && openNote === annotation.id && <div className="note-content">{annotation.content}</div>}</div>)}
+              {draft?.page === page && (tool === "freehand" ? stroke({ id: "draft", page: draft.page, kind: "freehand", color, geometry: { x: 0, y: 0, w: 1, h: 1, points: draft.points } }) : <div className={`annotation annotation-${tool} draft`} style={annotationStyle({ id: "draft", page: draft.page, kind: tool as Annotation["kind"], color, geometry: { x: Math.min(draft.x, draft.currentX), y: Math.min(draft.y, draft.currentY), w: Math.abs(draft.currentX - draft.x), h: Math.abs(draft.currentY - draft.y) } })} />)}
             </div>
           </div>
-        ))}
+        )}
       </Document>
-      {pendingNote && <div className="note-editor" role="dialog" aria-label="Texto da anotação"><strong>Sticky note</strong><textarea autoFocus maxLength={4000} value={noteText} onChange={(event) => setNoteText(event.target.value)} placeholder="Digite o comentário..." /><div><button onClick={() => setPendingNote(null)}>Cancelar</button><button className="primary-button" disabled={!noteText.trim()} onClick={() => void saveNote()}>Salvar nota</button></div></div>}
+      {pendingNote && <div className="note-editor" role="dialog" aria-label={t("pdf.annotationText")}><strong>{t("pdf.stickyNote")}</strong><textarea autoFocus maxLength={4000} value={noteText} onChange={(event) => setNoteText(event.target.value)} placeholder={t("pdf.commentPlaceholder")} /><div><button onClick={() => setPendingNote(null)}>{t("common.cancel")}</button><button className="primary-button" disabled={!noteText.trim()} onClick={() => void saveNote()}>{t("pdf.saveNote")}</button></div></div>}
     </div>
   );
 }
