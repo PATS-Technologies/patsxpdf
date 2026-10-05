@@ -1,8 +1,8 @@
 "use client";
 
-import { PointerEvent, useEffect, useRef, useState } from "react";
+import { PointerEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import { MessageSquareText, Trash2 } from "lucide-react";
 import { useI18n } from "@/components/I18nProvider";
 
@@ -14,11 +14,15 @@ interface SearchMatch { page: number; text: string; itemIndex: number; occurrenc
 interface Props {
   documentId: string; page: number; zoom: number; rotation: number; search: SearchOptions;
   tool: string; color: string;
+  undoRequest: number;
+  redoRequest: number;
   onLoad: (pages: number, pdf: PDFDocumentProxy) => void;
   onReady: () => void;
   onLoadError: () => void;
+  onPageChange: (page: number) => void;
   onMatches: (matches: { page: number; text: string }[]) => void;
   onTextSelectionChange: (text: string) => void;
+  onHistoryChange: (documentId: string, canUndo: boolean, canRedo: boolean) => void;
 }
 
 function escapeRegExp(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
@@ -27,8 +31,15 @@ interface Geometry { x: number; y: number; w: number; h: number; points?: { x: n
 interface Annotation { id: string; page: number; kind: "highlight" | "note" | "circle" | "rectangle" | "freehand"; color: string; geometry: Geometry; content?: string | null; }
 type HistoryEntry = { type: "create"; annotation: Annotation } | { type: "delete"; annotation: Annotation } | { type: "move"; id: string; before: Geometry; after: Geometry };
 interface NoteDrag { id: string; pointerId: number; startX: number; startY: number; before: Geometry; current: Geometry; moved: boolean; }
+const HISTORY_LIMIT = 10;
+const PAGE_RENDER_BUFFER = 2;
 
-export default function PdfViewer({ documentId, page, zoom, rotation, search, tool, color, onLoad, onReady, onLoadError, onMatches, onTextSelectionChange }: Props) {
+function PagePlaceholder({ page, scale, rotate }: { page: PDFPageProxy; scale: number; rotate: number }) {
+  const viewport = page.getViewport({ scale, rotation: rotate });
+  return <div style={{ width: viewport.width, height: viewport.height }} />;
+}
+
+export default function PdfViewer({ documentId, page, zoom, rotation, search, tool, color, undoRequest, redoRequest, onLoad, onReady, onLoadError, onPageChange, onMatches, onTextSelectionChange, onHistoryChange }: Props) {
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
@@ -40,9 +51,15 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [matchLocations, setMatchLocations] = useState<SearchMatch[]>([]);
   const annotationsRef = useRef<Annotation[]>([]);
-  const historyRef = useRef<HistoryEntry[]>([]);
+  const undoHistoryRef = useRef<HistoryEntry[]>([]);
+  const redoHistoryRef = useRef<HistoryEntry[]>([]);
   const noteDragRef = useRef<NoteDrag | null>(null);
-  const undoingRef = useRef(false);
+  const historyBusyRef = useRef(false);
+  const lastUndoRequestRef = useRef(undoRequest);
+  const lastRedoRequestRef = useRef(redoRequest);
+  const scrollPageRef = useRef<number | null>(null);
+  const scrollAnchorRef = useRef<{ page: number; top: number } | null>(null);
+  const navigationPageRef = useRef<number | null>(null);
 
   useEffect(() => { annotationsRef.current = annotations; }, [annotations]);
 
@@ -74,30 +91,97 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
   useEffect(() => {
     let activeRequest = true;
     fetch(`/api/documents/${documentId}/annotations`).then((response) => response.ok ? response.json() : []).then((data) => {
-      if (activeRequest) { setAnnotations(data); historyRef.current = []; setSelectedId(null); }
+      if (activeRequest) {
+        setAnnotations(data);
+        undoHistoryRef.current = [];
+        redoHistoryRef.current = [];
+        onHistoryChange(documentId, false, false);
+        setSelectedId(null);
+      }
     });
     return () => { activeRequest = false; };
-  }, [documentId]);
+  }, [documentId, onHistoryChange]);
 
   useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      const target = event.target as HTMLElement | null;
-      const editingText = target?.matches("input, textarea, [contenteditable='true']");
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && !editingText) {
-        event.preventDefault();
-        void undoLast();
-      } else if ((event.key === "Delete" || event.key === "Backspace") && selectedId && !editingText) {
-        event.preventDefault();
-        void removeAnnotation(selectedId);
-      }
+    if (scrollPageRef.current === page) {
+      scrollPageRef.current = null;
+      return;
     }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  });
+    const target = containerRef.current?.querySelector<HTMLElement>(`[data-page-number="${page}"]`);
+    if (!target) return;
+    navigationPageRef.current = page;
+    let settleTimer: ReturnType<typeof setTimeout>;
+    const alignTarget = () => {
+      target.scrollIntoView({ behavior: "auto", block: "start" });
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        if (navigationPageRef.current === page) navigationPageRef.current = null;
+      }, 150);
+    };
+    const documentElement = containerRef.current?.querySelector(".react-pdf__Document");
+    const resizeObserver = new ResizeObserver(alignTarget);
+    if (documentElement) resizeObserver.observe(documentElement);
+    alignTarget();
+    return () => {
+      resizeObserver.disconnect();
+      clearTimeout(settleTimer);
+    };
+  }, [page, pdf]);
+
+  useLayoutEffect(() => {
+    const anchor = scrollAnchorRef.current;
+    const container = containerRef.current;
+    if (!anchor || anchor.page !== page || !container) return;
+    const anchorPage = container.querySelector<HTMLElement>(`[data-page-number="${anchor.page}"]`);
+    if (anchorPage) {
+      const nextTop = anchorPage.getBoundingClientRect().top - container.getBoundingClientRect().top;
+      container.scrollTop += nextTop - anchor.top;
+    }
+    scrollAnchorRef.current = null;
+  }, [page]);
 
   useEffect(() => {
-    containerRef.current?.querySelector(`[data-page-number="${page}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [page]);
+    const container = containerRef.current;
+    if (!container || !pdf) return;
+    let animationFrame = 0;
+
+    function updatePageFromScroll() {
+      animationFrame = 0;
+      if (navigationPageRef.current !== null) return;
+      const containerBounds = container!.getBoundingClientRect();
+      const renderedPages = container!.querySelectorAll<HTMLElement>(".pdf-page");
+      let visiblePage = page;
+      let visibleHeight = 0;
+
+      renderedPages.forEach((renderedPage) => {
+        const bounds = renderedPage.getBoundingClientRect();
+        const height = Math.max(0, Math.min(bounds.bottom, containerBounds.bottom) - Math.max(bounds.top, containerBounds.top));
+        const pageNumber = Number(renderedPage.dataset.pageNumber);
+        if (height > visibleHeight && Number.isInteger(pageNumber)) {
+          visibleHeight = height;
+          visiblePage = pageNumber;
+        }
+      });
+
+      if (visiblePage === page || visibleHeight === 0) return;
+      const anchorPage = container!.querySelector<HTMLElement>(`[data-page-number="${visiblePage}"]`);
+      if (!anchorPage) return;
+      scrollAnchorRef.current = { page: visiblePage, top: anchorPage.getBoundingClientRect().top - containerBounds.top };
+      scrollPageRef.current = visiblePage;
+      onPageChange(visiblePage);
+    }
+
+    function handleScroll() {
+      if (animationFrame) cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(updatePageFromScroll);
+    }
+
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      container.removeEventListener("scroll", handleScroll);
+      if (animationFrame) cancelAnimationFrame(animationFrame);
+    };
+  }, [onPageChange, page, pdf]);
 
   useEffect(() => {
     if (!pdf || !search.query.trim()) { onMatches([]); return; }
@@ -123,7 +207,7 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
     return () => { cancelled = true; };
   }, [pdf, search.query, search.wholeWord, search.caseSensitive, onMatches]);
 
-  const highlight = ({ str, pageNumber, itemIndex }: { str: string; pageNumber: number; itemIndex: number }) => {
+  const highlight = useCallback(({ str, pageNumber, itemIndex }: { str: string; pageNumber: number; itemIndex: number }) => {
     if (!search.query.trim()) return str;
     const flags = search.caseSensitive ? "g" : "gi";
     const source = `${search.wholeWord ? "\\b" : ""}(${escapeRegExp(search.query.trim())})${search.wholeWord ? "\\b" : ""}`;
@@ -133,7 +217,7 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
       occurrence += 1;
       return `<mark${matchIndex === search.current ? ' class="search-current"' : ""}>${matched}</mark>`;
     });
-  };
+  }, [matchLocations, search]);
 
   function point(event: PointerEvent<HTMLDivElement>) {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -171,7 +255,7 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
     if (response.ok) {
       const saved: Annotation = await response.json();
       setAnnotations((current) => [...current, saved]);
-      if (recordHistory) historyRef.current.push({ type: "create", annotation: saved });
+      if (recordHistory) recordHistoryEntry({ type: "create", annotation: saved });
       return saved;
     }
     return null;
@@ -192,30 +276,116 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
     setAnnotations((current) => current.filter((item) => item.id !== id));
     setSelectedId((current) => current === id ? null : current);
     setOpenNote((current) => current === id ? null : current);
-    if (recordHistory) historyRef.current.push({ type: "delete", annotation });
+    if (recordHistory) recordHistoryEntry({ type: "delete", annotation });
     return true;
   }
 
-  async function undoLast() {
-    if (undoingRef.current) return;
-    const entry = historyRef.current.pop();
-    if (!entry) return;
-    undoingRef.current = true;
-    let succeeded = false;
-    if (entry.type === "create") succeeded = await removeAnnotation(entry.annotation.id, false);
-    if (entry.type === "delete") {
-      const restored = await saveAnnotation({ page: entry.annotation.page, kind: entry.annotation.kind, color: entry.annotation.color, geometry: entry.annotation.geometry, content: entry.annotation.content }, false);
-      succeeded = Boolean(restored);
-      if (restored) historyRef.current = historyRef.current.map((item) => {
-        if (item.type === "create" && item.annotation.id === entry.annotation.id) return { ...item, annotation: restored };
-        if (item.type === "move" && item.id === entry.annotation.id) return { ...item, id: restored.id };
-        return item;
-      });
-    }
-    if (entry.type === "move") succeeded = await patchGeometry(entry.id, entry.before);
-    if (!succeeded) historyRef.current.push(entry);
-    undoingRef.current = false;
+  function notifyHistoryChange() {
+    onHistoryChange(documentId, Boolean(undoHistoryRef.current.length), Boolean(redoHistoryRef.current.length));
   }
+
+  function pushHistory(stack: HistoryEntry[], entry: HistoryEntry) {
+    stack.push(entry);
+    if (stack.length > HISTORY_LIMIT) stack.splice(0, stack.length - HISTORY_LIMIT);
+  }
+
+  function recordHistoryEntry(entry: HistoryEntry) {
+    pushHistory(undoHistoryRef.current, entry);
+    redoHistoryRef.current = [];
+    notifyHistoryChange();
+  }
+
+  function replaceEntryId(entry: HistoryEntry, previousId: string, nextId: string): HistoryEntry {
+    if (entry.type === "move") return entry.id === previousId ? { ...entry, id: nextId } : entry;
+    return entry.annotation.id === previousId ? { ...entry, annotation: { ...entry.annotation, id: nextId } } : entry;
+  }
+
+  function replaceHistoryId(previousId: string, nextId: string) {
+    undoHistoryRef.current = undoHistoryRef.current.map((entry) => replaceEntryId(entry, previousId, nextId));
+    redoHistoryRef.current = redoHistoryRef.current.map((entry) => replaceEntryId(entry, previousId, nextId));
+  }
+
+  async function undoLast() {
+    if (historyBusyRef.current) return;
+    const entry = undoHistoryRef.current.pop();
+    if (!entry) return;
+    historyBusyRef.current = true;
+    let redoEntry = entry;
+    let succeeded = false;
+    try {
+      if (entry.type === "create") succeeded = await removeAnnotation(entry.annotation.id, false);
+      if (entry.type === "delete") {
+        const restored = await saveAnnotation({ page: entry.annotation.page, kind: entry.annotation.kind, color: entry.annotation.color, geometry: entry.annotation.geometry, content: entry.annotation.content }, false);
+        succeeded = Boolean(restored);
+        if (restored) {
+          replaceHistoryId(entry.annotation.id, restored.id);
+          redoEntry = { ...entry, annotation: restored };
+        }
+      }
+      if (entry.type === "move") succeeded = await patchGeometry(entry.id, entry.before);
+      if (succeeded) pushHistory(redoHistoryRef.current, redoEntry);
+      else pushHistory(undoHistoryRef.current, entry);
+    } finally {
+      historyBusyRef.current = false;
+      notifyHistoryChange();
+    }
+  }
+
+  async function redoLast() {
+    if (historyBusyRef.current) return;
+    const entry = redoHistoryRef.current.pop();
+    if (!entry) return;
+    historyBusyRef.current = true;
+    let undoEntry = entry;
+    let succeeded = false;
+    try {
+      if (entry.type === "create") {
+        const restored = await saveAnnotation({ page: entry.annotation.page, kind: entry.annotation.kind, color: entry.annotation.color, geometry: entry.annotation.geometry, content: entry.annotation.content }, false);
+        succeeded = Boolean(restored);
+        if (restored) {
+          replaceHistoryId(entry.annotation.id, restored.id);
+          undoEntry = { ...entry, annotation: restored };
+        }
+      }
+      if (entry.type === "delete") succeeded = await removeAnnotation(entry.annotation.id, false);
+      if (entry.type === "move") succeeded = await patchGeometry(entry.id, entry.after);
+      if (succeeded) pushHistory(undoHistoryRef.current, undoEntry);
+      else pushHistory(redoHistoryRef.current, entry);
+    } finally {
+      historyBusyRef.current = false;
+      notifyHistoryChange();
+    }
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const editingText = target?.matches("input, textarea, [contenteditable='true']");
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && !editingText) {
+        event.preventDefault();
+        void undoLast();
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y" && !editingText) {
+        event.preventDefault();
+        void redoLast();
+      } else if ((event.key === "Delete" || event.key === "Backspace") && selectedId && !editingText) {
+        event.preventDefault();
+        void removeAnnotation(selectedId);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  });
+
+  useEffect(() => {
+    if (lastUndoRequestRef.current !== undoRequest) {
+      lastUndoRequestRef.current = undoRequest;
+      void undoLast();
+    }
+    if (lastRedoRequestRef.current !== redoRequest) {
+      lastRedoRequestRef.current = redoRequest;
+      void redoLast();
+    }
+  });
 
   async function saveNote() {
     if (!pendingNote || !noteText.trim()) return;
@@ -259,7 +429,7 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
     const drag = noteDragRef.current;
     noteDragRef.current = null;
     if (!drag?.moved) { setOpenNote(openNote === annotation.id ? null : annotation.id); return; }
-    if (await patchGeometry(annotation.id, drag.current)) historyRef.current.push({ type: "move", id: annotation.id, before: drag.before, after: drag.current });
+    if (await patchGeometry(annotation.id, drag.current)) recordHistoryEntry({ type: "move", id: annotation.id, before: drag.before, after: drag.current });
     else setAnnotations((current) => current.map((item) => item.id === annotation.id ? { ...item, geometry: drag.before } : item));
   }
 
@@ -268,19 +438,37 @@ export default function PdfViewer({ documentId, page, zoom, rotation, search, to
     return selectedId === annotation.id && <button className="annotation-delete" style={style} title={t("pdf.removeAnnotation")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); void removeAnnotation(annotation.id); }}><Trash2 size={13} /></button>;
   }
 
+  const renderedPages = pdf
+    ? Array.from({ length: pdf.numPages }, (_, index) => index + 1)
+    : [];
+
   return (
     <div className="pdf-scroll" ref={containerRef} onPointerDown={clearPreviousTextSelection}>
       <Document file={`/api/documents/${documentId}/file`} loading={<div className="viewer-message">{t("pdf.loading")}</div>} error={<div className="viewer-message error">{t("pdf.loadError")}</div>} onLoadSuccess={(loaded) => { setPdf(loaded); onLoad(loaded.numPages, loaded); }} onLoadError={onLoadError}>
-        {pdf && (
-          <div className="pdf-page" data-page-number={page} key={page}>
-            <span className="page-badge">{page}</span>
-            <Page pageNumber={page} scale={zoom / 100} rotate={rotation} renderAnnotationLayer renderTextLayer customTextRenderer={highlight} onRenderSuccess={onReady} onRenderError={onLoadError} />
-            <div className={`drawing-layer ${tool !== "select" ? `drawing tool-${tool}` : ""}`} onPointerDown={(event) => startAnnotation(event, page)} onPointerMove={(event) => { if (draft?.page === page) { const current = point(event); setDraft({ ...draft, currentX: current.x, currentY: current.y, points: tool === "freehand" ? [...draft.points, current] : draft.points }); } }} onPointerUp={(event) => void finishAnnotation(event)}>
-              {annotations.filter((annotation) => annotation.page === page).map((annotation) => annotation.kind === "freehand" ? <div className="annotation-freehand" key={annotation.id}>{stroke(annotation)}{deleteButton(annotation, true)}</div> : <div key={annotation.id} className={`annotation annotation-${annotation.kind} ${selectedId === annotation.id ? "selected" : ""}`} style={annotationStyle(annotation)} onPointerDown={(event) => { if (tool === "select") { event.stopPropagation(); setSelectedId(annotation.id); } }}>{annotation.kind === "note" && <button className="note-pin" title={tool === "select" ? t("pdf.moveAnnotation") : t("pdf.toggleAnnotation")} onPointerDown={(event) => startNoteDrag(event, annotation)} onPointerMove={moveNote} onPointerUp={(event) => void finishNoteDrag(event, annotation)}><MessageSquareText size={14} /></button>}{deleteButton(annotation)}{annotation.kind === "note" && openNote === annotation.id && <div className="note-content">{annotation.content}</div>}</div>)}
-              {draft?.page === page && (tool === "freehand" ? stroke({ id: "draft", page: draft.page, kind: "freehand", color, geometry: { x: 0, y: 0, w: 1, h: 1, points: draft.points } }) : <div className={`annotation annotation-${tool} draft`} style={annotationStyle({ id: "draft", page: draft.page, kind: tool as Annotation["kind"], color, geometry: { x: Math.min(draft.x, draft.currentX), y: Math.min(draft.y, draft.currentY), w: Math.abs(draft.currentX - draft.x), h: Math.abs(draft.currentY - draft.y) } })} />)}
+        {renderedPages.map((pageNumber) => (
+          <div className="pdf-page" data-page-number={pageNumber} key={pageNumber}>
+            <span className="page-badge">{pageNumber}</span>
+            <Page
+              pageNumber={pageNumber}
+              scale={zoom / 100}
+              rotate={rotation}
+              renderMode={Math.abs(pageNumber - page) <= PAGE_RENDER_BUFFER ? "canvas" : "none"}
+              renderAnnotationLayer={Math.abs(pageNumber - page) <= PAGE_RENDER_BUFFER}
+              renderTextLayer={Math.abs(pageNumber - page) <= PAGE_RENDER_BUFFER}
+              customTextRenderer={highlight}
+              onRenderSuccess={pageNumber === page ? onReady : undefined}
+              onRenderError={onLoadError}
+            >
+              {Math.abs(pageNumber - page) > PAGE_RENDER_BUFFER
+                ? ({ page: loadedPage, scale, rotate }) => <PagePlaceholder page={loadedPage} scale={scale} rotate={rotate} />
+                : null}
+            </Page>
+            <div className={`drawing-layer ${tool !== "select" ? `drawing tool-${tool}` : ""}`} onPointerDown={(event) => startAnnotation(event, pageNumber)} onPointerMove={(event) => { if (draft?.page === pageNumber) { const current = point(event); setDraft({ ...draft, currentX: current.x, currentY: current.y, points: tool === "freehand" ? [...draft.points, current] : draft.points }); } }} onPointerUp={(event) => void finishAnnotation(event)}>
+              {annotations.filter((annotation) => annotation.page === pageNumber).map((annotation) => annotation.kind === "freehand" ? <div className="annotation-freehand" key={annotation.id}>{stroke(annotation)}{deleteButton(annotation, true)}</div> : <div key={annotation.id} className={`annotation annotation-${annotation.kind} ${selectedId === annotation.id ? "selected" : ""}`} style={annotationStyle(annotation)} onPointerDown={(event) => { if (tool === "select") { event.stopPropagation(); setSelectedId(annotation.id); } }}>{annotation.kind === "note" && <button className="note-pin" title={tool === "select" ? t("pdf.moveAnnotation") : t("pdf.toggleAnnotation")} onPointerDown={(event) => startNoteDrag(event, annotation)} onPointerMove={moveNote} onPointerUp={(event) => void finishNoteDrag(event, annotation)}><MessageSquareText size={14} /></button>}{deleteButton(annotation)}{annotation.kind === "note" && openNote === annotation.id && <div className="note-content">{annotation.content}</div>}</div>)}
+              {draft?.page === pageNumber && (tool === "freehand" ? stroke({ id: "draft", page: draft.page, kind: "freehand", color, geometry: { x: 0, y: 0, w: 1, h: 1, points: draft.points } }) : <div className={`annotation annotation-${tool} draft`} style={annotationStyle({ id: "draft", page: draft.page, kind: tool as Annotation["kind"], color, geometry: { x: Math.min(draft.x, draft.currentX), y: Math.min(draft.y, draft.currentY), w: Math.abs(draft.currentX - draft.x), h: Math.abs(draft.currentY - draft.y) } })} />)}
             </div>
           </div>
-        )}
+        ))}
       </Document>
       {pendingNote && <div className="note-editor" role="dialog" aria-label={t("pdf.annotationText")}><strong>{t("pdf.stickyNote")}</strong><textarea autoFocus maxLength={4000} value={noteText} onChange={(event) => setNoteText(event.target.value)} placeholder={t("pdf.commentPlaceholder")} /><div><button onClick={() => setPendingNote(null)}>{t("common.cancel")}</button><button className="primary-button" disabled={!noteText.trim()} onClick={() => void saveNote()}>{t("pdf.saveNote")}</button></div></div>}
     </div>

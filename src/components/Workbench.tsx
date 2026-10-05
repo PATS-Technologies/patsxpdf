@@ -1,12 +1,12 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { ChangeEvent, DragEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft, ArrowLeftToLine, ArrowRight, ArrowRightToLine,
-  ChevronDown, Circle,
+  CheckCircle2, ChevronDown, Circle,
   FilePlus2, FolderOpen,
   Highlighter,
   LoaderCircle,
@@ -21,7 +21,10 @@ import {
 import type { SessionUser } from "@/lib/auth";
 import type { SearchOptions } from "@/components/PdfViewer";
 import { ParametersPanel, UserProfileDialog, UsersPanel } from "@/components/Administration";
+import { AuditPanel } from "@/components/AuditPanel";
+import { ErrorLogPanel } from "@/components/ErrorLogPanel";
 import { ConversionsPanel } from "@/components/ConversionsPanel";
+import { OcrQueuePanel } from "@/components/OcrQueuePanel";
 import { isEditableTarget, TablePagination, useEscape, usePaginatedItems } from "@/components/TablePagination";
 import { useI18n } from "@/components/I18nProvider";
 import { localeFlags, type TranslationKey } from "@/lib/i18n";
@@ -30,7 +33,24 @@ const PdfViewer = dynamic(() => import("@/components/PdfViewer"), { ssr: false }
 
 interface PdfRecord { id: string; original_name: string; page_count: number; size_bytes: string; uploaded_at: string; document_date: string | null; }
 interface OpenPdf extends PdfRecord { page: number; zoom: number; rotation: number; }
-type Modal = "upload" | "library" | "windows" | "help" | null;
+interface TrackedExtraction { id: string; displayId: string; }
+interface ExtractionNotification extends TrackedExtraction { filename: string; }
+type Modal = "upload" | "library" | "windows" | "help" | "extractPages" | "extractionQueued" | "extractionResult" | null;
+
+function parsePageSelection(value: string, pageCount: number) {
+  const pages = new Set<number>();
+  for (const part of value.split(",").map((item) => item.trim()).filter(Boolean)) {
+    const range = part.match(/^(\d+)\s*-\s*(\d+)$/);
+    const single = part.match(/^\d+$/);
+    if (!range && !single) throw new Error("INVALID_PAGE_SELECTION");
+    const start = Number(range?.[1] ?? part);
+    const end = Number(range?.[2] ?? part);
+    if (start < 1 || end > pageCount || start > end) throw new Error("INVALID_PAGE_SELECTION");
+    for (let page = start; page <= end; page += 1) pages.add(page);
+  }
+  if (!pages.size) throw new Error("INVALID_PAGE_SELECTION");
+  return [...pages].sort((left, right) => left - right);
+}
 
 function closeOpenMenus(except?: HTMLDetailsElement) {
   document.querySelectorAll<HTMLDetailsElement>("details.menu[open]").forEach((menu) => {
@@ -116,10 +136,27 @@ export default function Workbench({ user }: { user: SessionUser }) {
   const [selectedPdfText, setSelectedPdfText] = useState("");
   const [tool, setTool] = useState("select");
   const [annotationColor, setAnnotationColor] = useState("#f5d90a");
-  const [view, setView] = useState<"viewer" | "params" | "users" | "conversions">("viewer");
+  const [undoRequest, setUndoRequest] = useState(0);
+  const [redoRequest, setRedoRequest] = useState(0);
+  const [canUndoAnnotation, setCanUndoAnnotation] = useState(false);
+  const [canRedoAnnotation, setCanRedoAnnotation] = useState(false);
+  const [historyDocumentId, setHistoryDocumentId] = useState<string | null>(null);
+  const [view, setView] = useState<"viewer" | "params" | "users" | "conversions" | "ocr" | "audit" | "errors">("viewer");
   const [profileOpen, setProfileOpen] = useState(false);
   const [selectedConversionId, setSelectedConversionId] = useState<string | null>(null);
+  const [pageSelection, setPageSelection] = useState("");
+  const [pageSelectionError, setPageSelectionError] = useState("");
+  const [extractionResult, setExtractionResult] = useState("");
+  const [extractionJson, setExtractionJson] = useState<unknown>(null);
+  const [extractionFilename, setExtractionFilename] = useState("");
+  const [extractionFormat, setExtractionFormat] = useState<"text" | "json">("text");
+  const [extractionProcessing, setExtractionProcessing] = useState(false);
+  const [queuedExtraction, setQueuedExtraction] = useState<{ id: string; displayId: string } | null>(null);
+  const [trackedExtractions, setTrackedExtractions] = useState<TrackedExtraction[]>([]);
+  const [extractionTrackingReady, setExtractionTrackingReady] = useState(false);
+  const [extractionNotifications, setExtractionNotifications] = useState<ExtractionNotification[]>([]);
   const active = openPdfs.find((item) => item.id === activeId) ?? null;
+  const extractionStorageKey = `patsxpdf-extractions-${user.id}`;
 
   const loadLibrary = useCallback(async () => {
     const response = await fetch("/api/documents");
@@ -128,6 +165,12 @@ export default function Workbench({ user }: { user: SessionUser }) {
       setLibrary(records);
       setSelectedId((current) => current && records.some((item) => item.id === current) ? current : records[0]?.id ?? null);
     }
+  }, []);
+
+  const handleAnnotationHistoryChange = useCallback((documentId: string, canUndo: boolean, canRedo: boolean) => {
+    setHistoryDocumentId(documentId);
+    setCanUndoAnnotation(canUndo);
+    setCanRedoAnnotation(canRedo);
   }, []);
 
   useEffect(() => {
@@ -200,6 +243,7 @@ export default function Workbench({ user }: { user: SessionUser }) {
 
   const closeOtherDocuments = useCallback(() => {
     if (!active) return;
+    setExtractionFilename(active.original_name);
     setOpenPdfs([active]);
   }, [active]);
 
@@ -290,6 +334,131 @@ export default function Workbench({ user }: { user: SessionUser }) {
     const heightZoom = active.zoom * availableHeight / bounds.height;
     const nextZoom = mode === "width" ? widthZoom : mode === "height" ? heightZoom : Math.min(widthZoom, heightZoom);
     updateActive({ zoom: Math.min(500, Math.max(5, Math.round(nextZoom))) });
+    if (mode === "page") {
+      requestAnimationFrame(() => {
+        renderedPage.closest<HTMLElement>(".pdf-page")?.scrollIntoView({ behavior: "auto", block: "start" });
+      });
+    }
+  }
+
+  const extractPages = useCallback(async (pageNumbers: number[]) => {
+    if (!active) return;
+    setModal(null);
+    if (pageNumbers.length === 1) setExtractionProcessing(true);
+    try {
+      const response = await fetch("/api/extractions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ documentId: active.id, pages: pageNumbers }),
+      });
+      const result = await response.json() as { id?: string; displayId?: string; text?: string; json?: unknown; error?: string };
+      if (!response.ok) throw new Error(result.error ?? t("extract.failed"));
+      if (pageNumbers.length === 1) {
+        setExtractionResult(result.text ?? "");
+        setExtractionJson(result.json ?? null);
+        setExtractionFormat("text");
+        setModal("extractionResult");
+      } else if (result.id && result.displayId) {
+        setQueuedExtraction({ id: result.id, displayId: result.displayId });
+        setTrackedExtractions((current) => current.some((item) => item.id === result.id)
+          ? current
+          : [...current, { id: result.id!, displayId: result.displayId! }]);
+        setModal("extractionQueued");
+      }
+    } catch (error) {
+      console.error("Unable to extract PDF text.", error);
+      window.alert(error instanceof Error ? error.message : t("extract.failed"));
+    } finally {
+      setExtractionProcessing(false);
+    }
+  }, [active, t]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      try {
+        const stored = JSON.parse(localStorage.getItem(extractionStorageKey) ?? "[]") as TrackedExtraction[];
+        setTrackedExtractions(stored.filter((item) => typeof item.id === "string" && typeof item.displayId === "string"));
+      } catch {
+        localStorage.removeItem(extractionStorageKey);
+      } finally {
+        setExtractionTrackingReady(true);
+      }
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [extractionStorageKey]);
+
+  useEffect(() => {
+    if (!extractionTrackingReady) return;
+    localStorage.setItem(extractionStorageKey, JSON.stringify(trackedExtractions));
+  }, [extractionStorageKey, extractionTrackingReady, trackedExtractions]);
+
+  useEffect(() => {
+    if (!trackedExtractions.length) return;
+    let activeRequest = true;
+    async function checkExtractions() {
+      const completed: ExtractionNotification[] = [];
+      const failed: string[] = [];
+      await Promise.all(trackedExtractions.map(async (extraction) => {
+        const response = await fetch(`/api/extractions/${extraction.id}`);
+        if (!response.ok) return;
+        const task = await response.json() as { status: string; original_name: string };
+        if (task.status === "completed") completed.push({ ...extraction, filename: task.original_name });
+        else if (task.status === "error") failed.push(extraction.id);
+      }));
+      if (!activeRequest || (!completed.length && !failed.length)) return;
+      const finishedIds = new Set([...completed.map((item) => item.id), ...failed]);
+      setTrackedExtractions((current) => current.filter((item) => !finishedIds.has(item.id)));
+      setExtractionNotifications((current) => [
+        ...current,
+        ...completed.filter((item) => !current.some((existing) => existing.id === item.id)),
+      ]);
+      if (failed.length) window.alert(t("extract.failed"));
+    }
+    void checkExtractions();
+    const interval = window.setInterval(() => void checkExtractions(), 3000);
+    return () => {
+      activeRequest = false;
+      window.clearInterval(interval);
+    };
+  }, [trackedExtractions, t]);
+
+  async function openExtractionNotification(notification: ExtractionNotification) {
+    try {
+      const [textResponse, jsonResponse] = await Promise.all([
+        fetch(`/api/extractions/${notification.id}/text`),
+        fetch(`/api/extractions/${notification.id}/json`),
+      ]);
+      if (!textResponse.ok || !jsonResponse.ok) throw new Error(t("extract.failed"));
+      setExtractionResult(await textResponse.text());
+      setExtractionJson(await jsonResponse.json());
+      setExtractionFilename(notification.filename);
+      setExtractionFormat("text");
+      setExtractionNotifications((current) => current.filter((item) => item.id !== notification.id));
+      setModal("extractionResult");
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : t("extract.failed"));
+    }
+  }
+
+  function downloadExtraction() {
+    const content = extractionFormat === "text" ? extractionResult : JSON.stringify(extractionJson, null, 2);
+    const anchor = document.createElement("a");
+    anchor.href = URL.createObjectURL(new Blob([content], { type: extractionFormat === "text" ? "text/plain;charset=utf-8" : "application/json" }));
+    anchor.download = `${extractionFilename}.${extractionFormat === "text" ? "txt" : "json"}`;
+    anchor.click();
+    URL.revokeObjectURL(anchor.href);
+  }
+
+  function submitPageSelection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!active) return;
+    try {
+      const pages = parsePageSelection(pageSelection, active.page_count);
+      setPageSelectionError("");
+      void extractPages(pages);
+    } catch {
+      setPageSelectionError(t("extract.invalidPages"));
+    }
   }
 
   async function logout() { await fetch("/api/auth/logout", { method: "POST" }); router.replace("/login"); router.refresh(); }
@@ -345,6 +514,8 @@ export default function Workbench({ user }: { user: SessionUser }) {
       else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "o") setModal("library");
       else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "c" && selectedPdfText) clearPdfSelection();
       else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "c") setView("conversions");
+      else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "e" && active) void extractPages([active.page]);
+      else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "e" && active) { setPageSelection(""); setPageSelectionError(""); setModal("extractPages"); }
       else if (event.altKey && !event.ctrlKey && !event.shiftKey && key === "f4" && openPdfs.length) closeAllDocuments();
       else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "f4" && active) closeOtherDocuments();
       else if (!event.ctrlKey && !event.altKey && !event.shiftKey && key === "f4" && active) closeDocument();
@@ -365,7 +536,7 @@ export default function Workbench({ user }: { user: SessionUser }) {
     }
     document.addEventListener("keydown", handleMenuShortcut);
     return () => document.removeEventListener("keydown", handleMenuShortcut);
-  }, [active, clearPdfSelection, closeAllDocuments, closeDocument, closeOtherDocuments, copyPdfSelection, goMatch, matches, modal, openCurrentSearch, openPdfs, profileOpen, search, selectedPdfText]);
+  }, [active, clearPdfSelection, closeAllDocuments, closeDocument, closeOtherDocuments, copyPdfSelection, extractPages, goMatch, matches, modal, openCurrentSearch, openPdfs, profileOpen, search, selectedPdfText]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -397,6 +568,9 @@ export default function Workbench({ user }: { user: SessionUser }) {
           </Menu>
           {/* Edit */}
           <Menu label={t("menu.edit")}>
+            <MenuItem shortcut="Ctrl+Z" disabled={!active || historyDocumentId !== active.id || !canUndoAnnotation} onClick={() => setUndoRequest((current) => current + 1)}>{t("menu.undo")}</MenuItem>
+            <MenuItem shortcut="Ctrl+Y" disabled={!active || historyDocumentId !== active.id || !canRedoAnnotation} onClick={() => setRedoRequest((current) => current + 1)}>{t("menu.redo")}</MenuItem>
+            <span className="menu-separator" />
             <MenuItem shortcut="Ctrl+C" disabled={!selectedPdfText} onClick={() => void copyPdfSelection()}>{t("menu.copy")}</MenuItem>
             <MenuItem shortcut="Alt+C" disabled={!selectedPdfText} onClick={clearPdfSelection}>{t("menu.deselect")}</MenuItem>
           </Menu>
@@ -436,9 +610,10 @@ export default function Workbench({ user }: { user: SessionUser }) {
           </Menu>
           {/* Extract */}
           <Menu label={t("menu.extract")}>
-            <MenuItem shortcut="Ctrl+E">{t("menu.extract.page")}</MenuItem>
-            <MenuItem shortcut="Alt+E">{t("menu.extract.pages")}</MenuItem>
-            <MenuItem shortcut="Ctrl+Alt+E">{t("menu.extract.ocr")}</MenuItem>
+            <MenuItem shortcut="Ctrl+E" disabled={!active} onClick={() => active && void extractPages([active.page])}>{t("menu.extract.page")}</MenuItem>
+            <MenuItem shortcut="Alt+E" disabled={!active} onClick={() => { setPageSelection(""); setPageSelectionError(""); setModal("extractPages"); }}>{t("menu.extract.pages")}</MenuItem>
+            <span className="menu-separator" />
+            <MenuItem onClick={() => setView("ocr")}>{t("menu.extract.ocrQueue")}</MenuItem>
           </Menu>
           {/* Compare */}
           <Menu label={t("menu.compare")}>
@@ -455,7 +630,7 @@ export default function Workbench({ user }: { user: SessionUser }) {
             {openPdfs.length > 20 && <MenuItem onClick={() => setModal("windows")}>{t("menu.window.more")}</MenuItem>}
           </Menu>
           {/* Settings */}
-          <Menu label={t("common.settings")}><MenuItem onClick={() => setView("params")}>{t("menu.parameters")}</MenuItem><MenuItem onClick={() => setView("users")}>{t("menu.users")}</MenuItem></Menu>
+          <Menu label={t("common.settings")}><MenuItem onClick={() => setView("params")}>{t("menu.parameters")}</MenuItem><MenuItem onClick={() => setView("users")}>{t("menu.users")}</MenuItem>{user.isAdmin && <><MenuItem onClick={() => setView("audit")}>{t("audit.title")}</MenuItem><MenuItem onClick={() => setView("errors")}>{t("errorLog.title")}</MenuItem></>}</Menu>
           {/* Help */}
           <Menu label={t("menu.help")}>
             <MenuItem shortcut="F1">{t("menu.help.page")}</MenuItem>
@@ -595,6 +770,12 @@ export default function Workbench({ user }: { user: SessionUser }) {
           ? <UsersPanel isAdmin={user.isAdmin} onClose={() => setView("viewer")} /> 
           : view === "conversions"
           ? <ConversionsPanel user={user} selectedId={selectedConversionId} onSelect={setSelectedConversionId} onOpen={openDocument} onClose={() => setView("viewer")} />
+          : view === "ocr"
+          ? <OcrQueuePanel user={user} onClose={() => setView("viewer")} />
+          : view === "audit" && user.isAdmin
+          ? <AuditPanel onClose={() => setView("viewer")} />
+          : view === "errors" && user.isAdmin
+          ? <ErrorLogPanel onClose={() => setView("viewer")} />
           : active 
             ? <PdfViewer
               key={active.id}
@@ -604,12 +785,16 @@ export default function Workbench({ user }: { user: SessionUser }) {
               rotation={active.rotation} 
               search={search} 
               tool={tool} 
-              color={annotationColor} 
+              color={annotationColor}
+              undoRequest={undoRequest}
+              redoRequest={redoRequest}
               onMatches={setMatches} 
               onLoad={(pages) => updateActive({ page_count: pages })}
               onReady={() => setProcessing(false)}
               onLoadError={() => setProcessing(false)}
-              onTextSelectionChange={setSelectedPdfText} />
+              onPageChange={(page) => updateActive({ page })}
+              onTextSelectionChange={setSelectedPdfText}
+              onHistoryChange={handleAnnotationHistoryChange} />
           : <div className="empty-state">
               <div className="empty-icon">
                 <FolderOpen size={38} />
@@ -640,9 +825,155 @@ export default function Workbench({ user }: { user: SessionUser }) {
       {modal === "library" && <ModalFrame title={t("viewer.openTitle")} closeLabel={t("common.close")} wide onClose={() => setModal(null)}><div className="modal-actions"><button className="primary-button" disabled={!selectedId} onClick={() => { const record = library.find((item) => item.id === selectedId); if (record) openDocument(record); }}><FolderOpen size={16} />{t("common.open")}</button></div><div ref={setLibraryContainer} className="table-scroll"><table><thead><tr>{[["original_name", t("viewer.file")], ["uploaded_at", t("viewer.uploadDate")], ["document_date", t("viewer.documentDate")], ["page_count", t("viewer.pages", { count: "" }).trim()]].map(([key, label]) => <th key={key} onClick={() => setSort({ key: key as keyof PdfRecord, direction: sort.key === key ? (sort.direction * -1) as 1 | -1 : 1 })}>{label}{sort.key === key ? (sort.direction === 1 ? " ↑" : " ↓") : ""}</th>)}</tr></thead><tbody>{libraryPageItems.map((item) => <tr key={item.id} className={selectedId === item.id ? "selected" : ""} onClick={() => setSelectedId(item.id)} onDoubleClick={() => openDocument(item)}><td>{item.original_name}</td><td>{formatDate(item.uploaded_at)}</td><td>{item.document_date ? formatDate(item.document_date) : "-"}</td><td>{formatNumber(item.page_count)}</td></tr>)}</tbody></table></div><TablePagination page={libraryPage} pageCount={libraryPageCount} onPageChange={setLibraryPage} /></ModalFrame>}
       {modal === "windows" && <ModalFrame title={t("viewer.openWindows")} closeLabel={t("common.close")} wide onClose={() => setModal(null)}><div className="window-grid">{openPdfs.map((item) => <button key={item.id} onDoubleClick={() => { activateDocument(item.id); setModal(null); }}>{item.original_name}<small>{t("viewer.pages", { count: formatNumber(item.page_count) })}</small></button>)}</div></ModalFrame>}
       {modal === "help" && <ModalFrame title="PATSXPDF" closeLabel={t("common.close")} onClose={() => setModal(null)}><div className="about-content"><div className="brand-mark">P</div><h3>{t("viewer.about")}</h3><p>{t("viewer.version")}</p></div></ModalFrame>}
+      {modal === "extractPages" && active && 
+      <ModalFrame 
+        title={t("menu.extract.pages")} 
+        closeLabel={t("common.close")} 
+        onClose={() => setModal(null)}
+      >
+        <form 
+          className="extract-pages-form" 
+          onSubmit={submitPageSelection}
+        >
+          <strong>{active.original_name}</strong>
+          <span>{t("viewer.pages", { count: formatNumber(active.page_count) })}</span>
+          <label>{t("extract.pagesLabel")}
+            <input 
+              autoFocus 
+              value={pageSelection} 
+              onChange={(event) => { 
+                setPageSelection(event.target.value); 
+                setPageSelectionError(""); 
+              }} 
+              placeholder={t("extract.pagesPlaceholder")} 
+            />
+          </label>
+          <p>{t("extract.pagesInstructions")}</p>
+          {pageSelectionError && 
+          <p className="form-error" role="alert">{pageSelectionError}</p>
+          }
+          <div className="dialog-actions">
+            <button 
+              type="button" 
+              className="secondary-button" 
+              onClick={() => setModal(null)}
+            >
+              {t("common.cancel")}
+            </button>
+            <button 
+              className="primary-button" 
+              type="submit" 
+              disabled={!pageSelection.trim()}
+            >
+              {t("menu.extract")}
+            </button>
+          </div>
+        </form>
+      </ModalFrame>}
+      {modal === "extractionQueued" && queuedExtraction && 
+      <ModalFrame 
+        title={t("extract.queuedTitle")} 
+        closeLabel={t("common.close")} 
+        onClose={() => setModal(null)}
+      >
+        <div className="extraction-queued">
+          <p>{t("extract.queuedMessage", { id: queuedExtraction.displayId })}</p>
+          <p>{t("extract.queuedInstructions")}</p>
+          <div className="dialog-actions">
+            <button 
+              className="primary-button" 
+              onClick={() => setModal(null)}
+            >
+              {t("common.close")}
+            </button>
+          </div>
+        </div>
+      </ModalFrame>}
+      {modal === "extractionResult" && 
+      <ModalFrame 
+        title={t("extract.resultTitle")} 
+        closeLabel={t("common.close")} 
+        wide 
+        onClose={() => setModal(null)}
+      >
+        <div className="extraction-result">
+          <strong>{extractionFilename}</strong>
+          <textarea 
+            readOnly 
+            value={extractionResult} 
+          />
+          <fieldset className="extraction-formats">
+            <legend>{t("extract.downloadFormat")}</legend>
+            <label>
+              <input 
+                type="radio" 
+                checked={extractionFormat === "text"} 
+                onChange={() => setExtractionFormat("text")} 
+              />
+              {t("extract.formatText")}
+            </label>
+            <label>
+              <input 
+                type="radio" 
+                checked={extractionFormat === "json"} 
+                onChange={() => setExtractionFormat("json")} 
+              />
+              {t("extract.formatJson")}
+            </label>
+          </fieldset>
+          <div className="dialog-actions">
+            <button 
+              className="secondary-button" 
+              onClick={() => setModal(null)}
+            >
+              {t("common.close")}
+            </button>
+            <button 
+              className="primary-button" 
+              onClick={downloadExtraction}
+            >
+              {t("common.download")}
+            </button>
+          </div>
+        </div>
+      </ModalFrame>}
+
+      <div className="extraction-toast-stack" aria-live="polite">
+        {extractionNotifications.map((notification) => <button
+          className="extraction-toast"
+          key={notification.id}
+          onClick={() => void openExtractionNotification(notification)}
+        >
+          <CheckCircle2 size={19} aria-hidden="true" />
+          <span><strong>{t("extract.completedToast")}</strong><small>{t("extract.completedToastAction", { id: notification.displayId })}</small></span>
+        </button>)}
+      </div>
 
       {/* Overlay processing... */}
-      {processing && <div className="processing-overlay" role="status" aria-live="assertive" aria-label={t("viewer.processing")}><div className="processing-indicator"><LoaderCircle size={30} aria-hidden="true" /><strong>{t("viewer.processing")}</strong></div></div>}
+      {processing && 
+      <div 
+        className="processing-overlay" 
+        role="status" 
+        aria-live="assertive" 
+        aria-label={t("viewer.processing")}
+      >
+        <div className="processing-indicator">
+          <LoaderCircle size={30} aria-hidden="true" />
+          <strong>{t("viewer.processing")}</strong>
+        </div>
+      </div>}
+      {extractionProcessing && 
+      <div 
+        className="processing-overlay" 
+        role="status" 
+        aria-live="assertive"
+        aria-label={t("extract.processing")}
+      >
+        <div className="processing-indicator">
+          <LoaderCircle size={30} aria-hidden="true" />
+          <strong>{t("extract.processing")}</strong>
+        </div>
+      </div>}
     </main>
   );
 }

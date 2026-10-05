@@ -18,7 +18,7 @@ export async function GET(request: Request) {
     const filters = querySchema.parse(Object.fromEntries(url.searchParams));
     const result = await query(`
       SELECT a.id,a.occurred_at,a.actor_id,u.login AS actor_login,a.action,a.resource_type,
-        a.resource_id,a.outcome,a.request_id,a.ip_address,a.user_agent,a.details
+        a.resource_id,a.filename,a.outcome,a.request_id,a.ip_address,a.user_agent,a.details
       FROM audit_event a
       LEFT JOIN app_user u ON u.id=a.actor_id
       WHERE ($1::bigint IS NULL OR a.id < $1)
@@ -28,5 +28,5 @@ export async function GET(request: Request) {
       LIMIT $4
     `, [filters.before ?? null, filters.actorId ?? null, filters.resourceType ?? null, filters.limit]);
     return NextResponse.json(result.rows);
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }

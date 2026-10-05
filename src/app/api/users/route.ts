@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/auth";
 import { query, transaction } from "@/lib/db";
-import { apiError } from "@/lib/http";
+import { apiError, errorResponse } from "@/lib/http";
 import { getUserInitials } from "@/lib/user-initials";
 import { writeAudit } from "@/lib/audit";
 import { serverTranslate } from "@/lib/i18n-server";
@@ -22,7 +22,7 @@ const userSchema = z.object({
   password: z.preprocess((value) => value === "" || value == null ? undefined : value, z.string().min(5).optional()),
 });
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     await requireUser("users-1");
     const result = await query<{ id: string }>(`
@@ -36,7 +36,7 @@ export async function GET() {
       GROUP BY u.id ORDER BY lower(u.login)
     `);
     return NextResponse.json(result.rows.map((user) => ({ ...user, id: Number(user.id) })));
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }
 
 export async function POST(request: Request) {
@@ -55,7 +55,7 @@ export async function POST(request: Request) {
       return userId;
     });
     return NextResponse.json({ id, activationCode: activation.code, activationExpiresAt: activation.expiresAt }, { status: 201 });
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }
 
 export async function PUT(request: Request) {
@@ -76,18 +76,18 @@ export async function PUT(request: Request) {
       await writeAudit({ actorId: actor.id, action: "user.update", resourceType: "app_user", resourceId: data.id, details: { roleIds: data.roleIds, passwordChanged: Boolean(data.password), preferredLocale: data.preferredLocale }, request }, client);
     });
     return NextResponse.json({ ok: true });
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }
 
 export async function DELETE(request: Request) {
   try {
     const actor = await requireUser("users-9");
     const id = Number(new URL(request.url).searchParams.get("id"));
-    if (!id || id === actor.id) return NextResponse.json({ error: await serverTranslate("error.invalidUserDelete") }, { status: 400 });
+    if (!id || id === actor.id) return errorResponse(request, await serverTranslate("error.invalidUserDelete"), 400, { actorId: actor.id, details: { userId: id || null } });
     await transaction(async (client) => {
       await client.query("UPDATE app_user SET deleted=true,updated_at=now() WHERE id=$1", [id]);
       await writeAudit({ actorId: actor.id, action: "user.delete", resourceType: "app_user", resourceId: id, request }, client);
     });
     return NextResponse.json({ ok: true });
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }

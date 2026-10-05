@@ -3,7 +3,7 @@ import { requireUser } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { apiError } from "@/lib/http";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const user = await requireUser("pdfs-1");
     const result = await query(`
@@ -18,5 +18,5 @@ export async function GET() {
       LIMIT 500
     `, [user.id, user.isAdmin]);
     return NextResponse.json(result.rows);
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }

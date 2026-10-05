@@ -17,7 +17,7 @@ const profileSchema = z.object({
   password: z.preprocess((value) => value === "" || value == null ? undefined : value, z.string().min(5).optional()),
 });
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const actor = await requireUser();
     const result = await query(`
@@ -31,7 +31,7 @@ export async function GET() {
       GROUP BY u.id
     `, [actor.id]);
     return NextResponse.json(result.rows[0]);
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }
 
 export async function PUT(request: Request) {
@@ -50,5 +50,5 @@ export async function PUT(request: Request) {
     });
     await setLocaleCookie(data.preferredLocale);
     return NextResponse.json({ ok: true, preferredLocale: data.preferredLocale });
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }

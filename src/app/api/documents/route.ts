@@ -5,7 +5,7 @@ import { PDFDocument } from "pdf-lib";
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth";
 import { query, transaction } from "@/lib/db";
-import { apiError } from "@/lib/http";
+import { apiError, errorResponse } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 import { serverTranslate } from "@/lib/i18n-server";
 import { convertOfficeToPdf, OfficeConversionError } from "@/lib/office-converter";
@@ -14,7 +14,7 @@ import { analyzeOfficeDocument } from "@/lib/office-analysis";
 const storagePath = process.env.PDF_STORAGE ?? path.join(process.cwd(), "data", "pdfs");
 const supportedOfficeExtensions = new Set([".docx", ".xlsx", ".pptx"]);
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     await requireUser("pdfs-1");
     const result = await query(`
@@ -22,22 +22,26 @@ export async function GET() {
       FROM pdf_document ORDER BY uploaded_at DESC
     `);
     return NextResponse.json(result.rows);
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }
 
 export async function POST(request: Request) {
   let conversionTaskId: string | null = null;
+  let actorId: number | null = null;
+  let uploadedFilename: string | null = null;
   try {
     const user = await requireUser("pdfs-2");
+    actorId = user.id;
     const form = await request.formData();
     const file = form.get("file");
     if (!(file instanceof File)) {
-      return NextResponse.json({ error: await serverTranslate("error.validPdf") }, { status: 400 });
+      return errorResponse(request, await serverTranslate("error.validPdf"), 400, { actorId });
     }
+    uploadedFilename = file.name;
     const extension = path.extname(file.name).toLowerCase();
     const isPdf = extension === ".pdf" || file.type === "application/pdf";
     const isOfficeDocument = supportedOfficeExtensions.has(extension);
-    if (!isPdf && !isOfficeDocument) return NextResponse.json({ error: await serverTranslate("error.validPdf") }, { status: 400 });
+    if (!isPdf && !isOfficeDocument) return errorResponse(request, await serverTranslate("error.validPdf"), 400, { actorId, filename: file.name });
 
     if (isOfficeDocument) {
       const requestedConversionId = form.get("conversionId");
@@ -55,9 +59,9 @@ export async function POST(request: Request) {
       const message = await serverTranslate("error.pdfTooLarge");
       if (conversionTaskId) {
         await query("UPDATE conversion_task SET status='error',details=$2,completed_at=now() WHERE id=$1", [conversionTaskId, message]);
-        return NextResponse.json({ error: message, conversionId: conversionTaskId, officeDocument: true }, { status: 413 });
+        return errorResponse(request, message, 413, { actorId, filename: file.name, response: { conversionId: conversionTaskId, officeDocument: true } });
       }
-      return NextResponse.json({ error: message }, { status: 413 });
+      return errorResponse(request, message, 413, { actorId, filename: file.name });
     }
 
     let bytes: Uint8Array;
@@ -87,7 +91,7 @@ export async function POST(request: Request) {
         const message = await serverTranslate(key);
         const details = error instanceof OfficeConversionError ? `${message}\n${error.details}` : `${message}\n${error instanceof Error ? error.message : String(error)}`;
         await query("UPDATE conversion_task SET status='error',details=$2,completed_at=now() WHERE id=$1", [conversionTaskId, details]);
-        return NextResponse.json({ error: message, conversionId: conversionTaskId, officeDocument: true }, { status: 502 });
+        return errorResponse(request, message, 502, { actorId, cause: error, filename: file.name, response: { conversionId: conversionTaskId, officeDocument: true } });
       }
       throw error;
     }
@@ -100,9 +104,9 @@ export async function POST(request: Request) {
         console.error("LibreOffice returned an invalid PDF", error);
         const message = await serverTranslate("error.conversionFailed");
         await query("UPDATE conversion_task SET status='error',details=$2,completed_at=now() WHERE id=$1", [conversionTaskId, message]);
-        return NextResponse.json({ error: message, conversionId: conversionTaskId, officeDocument: true }, { status: 502 });
+        return errorResponse(request, message, 502, { actorId, cause: error, filename: file.name, response: { conversionId: conversionTaskId, officeDocument: true } });
       }
-      return NextResponse.json({ error: await serverTranslate("error.validPdf") }, { status: 400 });
+      return errorResponse(request, await serverTranslate("error.validPdf"), 400, { actorId, cause: error, filename: file.name });
     }
     const id = randomUUID();
     const storageName = `${id}.pdf`;
@@ -122,7 +126,7 @@ export async function POST(request: Request) {
           WHERE id=$1
         `, [conversionTaskId, id, diagnostics.length ? "alert" : "ok", diagnostics.length ? diagnostics.join("\n") : null]);
       }
-      await writeAudit({ actorId: user.id, action: "document.upload", resourceType: "pdf_document", resourceId: id, details: { fileName: file.name, sourceSizeBytes: file.size, sizeBytes: bytes.byteLength, pageCount: pdf.getPageCount(), converted: isOfficeDocument }, request }, client);
+      await writeAudit({ actorId: user.id, action: "document.upload", resourceType: "pdf_document", resourceId: id, filename: file.name, details: { fileName: file.name, sourceSizeBytes: file.size, sizeBytes: bytes.byteLength, pageCount: pdf.getPageCount(), converted: isOfficeDocument }, request }, client);
       return result.rows[0];
     });
     return NextResponse.json(conversionTaskId
@@ -133,6 +137,6 @@ export async function POST(request: Request) {
       const details = error instanceof Error ? error.message : String(error);
       await query("UPDATE conversion_task SET status='error',details=$2,completed_at=now() WHERE id=$1 AND status='processing'", [conversionTaskId, details]);
     }
-    return apiError(error);
+    return apiError(error, request, { actorId, filename: uploadedFilename });
   }
 }

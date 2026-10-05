@@ -5,12 +5,12 @@ import { query, transaction } from "@/lib/db";
 import { apiError } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     await requireUser("params-1");
     const result = await query("SELECT code, value, description FROM app_param ORDER BY code");
     return NextResponse.json(result.rows);
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }
 
 export async function PATCH(request: Request) {
@@ -27,5 +27,5 @@ export async function PATCH(request: Request) {
       return result.rows[0];
     });
     return NextResponse.json(parameter);
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }

@@ -26,6 +26,22 @@ services:
       - ${WINDOWS_FONTS_PATH:-/mnt/c/Windows/Fonts}:/usr/local/share/fonts/windows:ro
       - font-catalog:/font-data
 
+  migrate:
+    image: postgres:17-bookworm
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-patsxpdf}
+      POSTGRES_USER: ${POSTGRES_USER:-patsxpdf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-patsxpdf}
+      PGHOST: db
+      PGPASSWORD: ${POSTGRES_PASSWORD:-patsxpdf}
+    command: ["/bin/sh", "/migrate.sh"]
+    volumes:
+      - ./db/init:/migrations:ro
+      - ./db/migrate.sh:/migrate.sh:ro
+
   libreoffice:
     image: gotenberg/gotenberg:8
     container_name: patsxpdf-libreoffice
@@ -45,6 +61,25 @@ services:
     volumes:
       - ${WINDOWS_FONTS_PATH:-/mnt/c/Windows/Fonts}:/usr/local/share/fonts/windows:ro
 
+  pdfbox:
+    build:
+      context: ./pdfbox-service
+    container_name: patsxpdf-pdfbox
+    restart: unless-stopped
+    environment:
+      PDFBOX_API_TOKEN: ${PDFBOX_API_TOKEN:-development-only-change-me}
+      OCR_MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      OCR_DPI: ${OCR_DPI:-300}
+      OCR_WORKERS: ${OCR_WORKERS:-1}
+      OCR_PAGE_TIMEOUT_SECONDS: ${OCR_PAGE_TIMEOUT_SECONDS:-180}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - ocr-data:/data/jobs
+
   app:
     build: .
     container_name: patsxpdf-app
@@ -52,7 +87,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       libreoffice:
+        condition: service_healthy
+      pdfbox:
         condition: service_healthy
       font-catalog:
         condition: service_completed_successfully
@@ -64,6 +103,9 @@ services:
       OFFICE_CONVERTER_URL: http://libreoffice:3000
       OFFICE_CONVERTER_TIMEOUT_MS: ${OFFICE_CONVERTER_TIMEOUT_MS:-120000}
       OFFICE_FONT_CATALOG: /data/font-catalog/families.txt
+      PDFBOX_SERVICE_URL: http://pdfbox:8080
+      PDFBOX_API_TOKEN: ${PDFBOX_API_TOKEN:-development-only-change-me}
+      PDFBOX_REQUEST_TIMEOUT_MS: ${PDFBOX_REQUEST_TIMEOUT_MS:-300000}
     ports:
       - "${APP_PORT:-3000}:3000"
     volumes:
@@ -74,3 +116,4 @@ volumes:
   postgres-data:
   pdf-data:
   font-catalog:
+  ocr-data:

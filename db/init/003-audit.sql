@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS audit_event (
   action VARCHAR(80) NOT NULL,
   resource_type VARCHAR(80) NOT NULL,
   resource_id VARCHAR(255),
+  filename VARCHAR(255),
   outcome VARCHAR(16) NOT NULL CHECK (outcome IN ('success', 'failure')),
   request_id UUID NOT NULL,
   ip_address INET,

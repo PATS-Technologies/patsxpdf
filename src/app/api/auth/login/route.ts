@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createSession, validateCredentials } from "@/lib/auth";
-import { apiError } from "@/lib/http";
+import { apiError, errorResponse } from "@/lib/http";
 import { writeAudit } from "@/lib/audit";
 import { serverTranslate } from "@/lib/i18n-server";
 
@@ -12,7 +12,7 @@ export async function POST(request: Request) {
     const parsed = credentialsSchema.safeParse(await request.json());
     if (!parsed.success) {
       await writeAudit({ action: "auth.login", resourceType: "session", outcome: "failure", details: { reason: "invalid-payload" }, request });
-      return NextResponse.json({ error: await serverTranslate("error.credentialsRequired") }, { status: 400 });
+      return errorResponse(request, await serverTranslate("error.credentialsRequired"), 400, { actorId: null, details: { reason: "invalid-payload" } });
     }
     const authentication = await validateCredentials(parsed.data.login, parsed.data.password);
     if (authentication.status === "password-expired") {
@@ -21,11 +21,11 @@ export async function POST(request: Request) {
     }
     if (authentication.status === "invalid") {
       await writeAudit({ action: "auth.login", resourceType: "session", outcome: "failure", details: { login: parsed.data.login, reason: "invalid-credentials" }, request });
-      return NextResponse.json({ error: await serverTranslate("error.invalidCredentials") }, { status: 401 });
+      return errorResponse(request, await serverTranslate("error.invalidCredentials"), 401, { actorId: null, details: { login: parsed.data.login, reason: "invalid-credentials" } });
     }
     const { user } = authentication;
     await createSession(user.id, user.preferredLocale);
     await writeAudit({ actorId: user.id, action: "auth.login", resourceType: "session", resourceId: user.id, request });
     return NextResponse.json({ user });
-  } catch (error) { return apiError(error); }
+  } catch (error) { return apiError(error, request); }
 }

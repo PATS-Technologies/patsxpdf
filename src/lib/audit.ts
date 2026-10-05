@@ -7,6 +7,7 @@ export interface AuditEvent {
   action: string;
   resourceType: string;
   resourceId?: string | number | null;
+  filename?: string | null;
   outcome?: "success" | "failure";
   details?: Record<string, unknown>;
   request?: Request;
@@ -20,6 +21,7 @@ export async function writeAudit(event: AuditEvent, client?: PoolClient) {
     event.action,
     event.resourceType,
     event.resourceId == null ? null : String(event.resourceId),
+    event.filename ?? null,
     event.outcome ?? "success",
     requestId,
     forwardedFor || event.request?.headers.get("x-real-ip") || null,
@@ -27,8 +29,8 @@ export async function writeAudit(event: AuditEvent, client?: PoolClient) {
     event.details ?? {},
   ];
   const sql = `
-    INSERT INTO audit_event(actor_id,action,resource_type,resource_id,outcome,request_id,ip_address,user_agent,details)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    INSERT INTO audit_event(actor_id,action,resource_type,resource_id,filename,outcome,request_id,ip_address,user_agent,details)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
   `;
   if (client) await client.query(sql, values);
   else await query(sql, values);
