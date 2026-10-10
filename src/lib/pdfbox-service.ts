@@ -1,8 +1,8 @@
 import "server-only";
 
-const serviceUrl = process.env.PDFBOX_SERVICE_URL ?? "http://pdfbox:8080";
-const serviceToken = process.env.PDFBOX_API_TOKEN ?? "development-only-change-me";
-const requestTimeoutMs = Number(process.env.PDFBOX_REQUEST_TIMEOUT_MS ?? 300_000);
+const serviceUrl = process.env.ENGINE_SERVICE_URL ?? "http://engine:8080";
+const serviceToken = process.env.ENGINE_API_TOKEN ?? "development-only-change-me";
+const requestTimeoutMs = Number(process.env.ENGINE_REQUEST_TIMEOUT_MS ?? 300_000);
 
 export const ocrLanguageCodes = ["por", "eng", "spa", "fra"] as const;
 export type OcrLanguageCode = typeof ocrLanguageCodes[number];

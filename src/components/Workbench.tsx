@@ -25,6 +25,7 @@ import { AuditPanel } from "@/components/AuditPanel";
 import { ErrorLogPanel } from "@/components/ErrorLogPanel";
 import { ConversionsPanel } from "@/components/ConversionsPanel";
 import { OcrQueuePanel } from "@/components/OcrQueuePanel";
+import { ComparisonResult } from "@/components/ComparisonResult";
 import { isEditableTarget, TablePagination, useEscape, usePaginatedItems } from "@/components/TablePagination";
 import { useI18n } from "@/components/I18nProvider";
 import { localeFlags, type TranslationKey } from "@/lib/i18n";
@@ -35,7 +36,7 @@ interface PdfRecord { id: string; original_name: string; page_count: number; siz
 interface OpenPdf extends PdfRecord { page: number; zoom: number; rotation: number; }
 interface TrackedExtraction { id: string; displayId: string; }
 interface ExtractionNotification extends TrackedExtraction { filename: string; }
-type Modal = "upload" | "library" | "windows" | "help" | "extractPages" | "extractionQueued" | "extractionResult" | null;
+type Modal = "upload" | "library" | "windows" | "help" | "extractPages" | "extractionQueued" | "extractionResult" | "compare" | null;
 
 function parsePageSelection(value: string, pageCount: number) {
   const pages = new Set<number>();
@@ -116,7 +117,7 @@ function MenuItem({ children, checked, disabled, onClick, shortcut }: { children
   </button>;
 }
 
-export default function Workbench({ user }: { user: SessionUser }) {
+export default function Workbench({ user, compareBaseUrl = null }: { user: SessionUser; compareBaseUrl?: string | null }) {
   const router = useRouter();
   const { locale, t, formatDate, formatNumber } = useI18n();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -141,7 +142,7 @@ export default function Workbench({ user }: { user: SessionUser }) {
   const [canUndoAnnotation, setCanUndoAnnotation] = useState(false);
   const [canRedoAnnotation, setCanRedoAnnotation] = useState(false);
   const [historyDocumentId, setHistoryDocumentId] = useState<string | null>(null);
-  const [view, setView] = useState<"viewer" | "params" | "users" | "conversions" | "ocr" | "audit" | "errors">("viewer");
+  const [view, setView] = useState<"viewer" | "params" | "users" | "conversions" | "ocr" | "audit" | "errors" | "comparison">("viewer");
   const [profileOpen, setProfileOpen] = useState(false);
   const [selectedConversionId, setSelectedConversionId] = useState<string | null>(null);
   const [pageSelection, setPageSelection] = useState("");
@@ -155,7 +156,18 @@ export default function Workbench({ user }: { user: SessionUser }) {
   const [trackedExtractions, setTrackedExtractions] = useState<TrackedExtraction[]>([]);
   const [extractionTrackingReady, setExtractionTrackingReady] = useState(false);
   const [extractionNotifications, setExtractionNotifications] = useState<ExtractionNotification[]>([]);
+  const [compareFirstId, setCompareFirstId] = useState<string | null>(null);
+  const [compareSecondId, setCompareSecondId] = useState<string | null>(null);
+  const [comparing, setComparing] = useState(false);
+  const [compareJobId, setCompareJobId] = useState<string | null>(null);
+  const [compareResultId, setCompareResultId] = useState<string | null>(null);
+  const [compareOffset, setCompareOffset] = useState(3);
+  const [compareFatSim, setCompareFatSim] = useState(0.7);
+  const [comparePosFixa, setComparePosFixa] = useState(true);
+  const [compareMaxPages, setCompareMaxPages] = useState(0);
+  const [compareError, setCompareError] = useState("");
   const active = openPdfs.find((item) => item.id === activeId) ?? null;
+  const compareFirst = openPdfs.find((item) => item.id === compareFirstId) ?? null;
   const extractionStorageKey = `patsxpdf-extractions-${user.id}`;
 
   const loadLibrary = useCallback(async () => {
@@ -224,6 +236,8 @@ export default function Workbench({ user }: { user: SessionUser }) {
 
   const closeDocument = useCallback((id = activeId) => {
     if (!id) return;
+    if (id === compareFirstId) setCompareFirstId(null);
+    if (id === compareSecondId) setCompareSecondId(null);
     const index = openPdfs.findIndex((item) => item.id === id);
     const remaining = openPdfs.filter((item) => item.id !== id);
     setOpenPdfs(remaining);
@@ -232,19 +246,92 @@ export default function Workbench({ user }: { user: SessionUser }) {
       setProcessing(Boolean(nextId));
       setActiveId(nextId);
     }
-  }, [activeId, openPdfs]);
+  }, [activeId, compareFirstId, compareSecondId, openPdfs]);
 
   const closeAllDocuments = useCallback(() => {
     if (!openPdfs.length || !confirm(t("question.confirmCloseAll"))) return;
     setOpenPdfs([]);
     setActiveId(null);
     setProcessing(false);
+    setCompareFirstId(null);
+    setCompareSecondId(null);
   }, [openPdfs.length, t]);
 
   const closeOtherDocuments = useCallback(() => {
     if (!active) return;
     setExtractionFilename(active.original_name);
     setOpenPdfs([active]);
+  }, [active]);
+
+  const markFirst = useCallback(() => {
+    if (!active) return;
+    setCompareFirstId((current) => (current === active.id ? null : active.id));
+    setCompareSecondId(null);
+  }, [active]);
+
+  const clearCompare = useCallback(() => {
+    setCompareFirstId(null);
+    setCompareSecondId(null);
+  }, []);
+
+  const canCompare = Boolean(compareFirstId && active && active.id !== compareFirstId && !comparing);
+
+  const startCompare = useCallback(async () => {
+    if (!compareFirstId || !active || active.id === compareFirstId) return;
+    const firstId = compareFirstId;
+    const secondId = active.id;
+    setComparing(true);
+    try {
+      const response = await fetch("/api/compare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          firstId,
+          secondId,
+          OFFSET: compareOffset,
+          FATSIM: compareFatSim,
+          POSFIXA: comparePosFixa,
+          MAX_PAGES: compareMaxPages,
+        }),
+      });
+      const result = await response.json().catch(() => ({})) as { error?: string; jobId?: string };
+      if (!response.ok) throw new Error(result.error ?? t("compare.failed"));
+      if (!result.jobId) throw new Error(t("compare.failed"));
+      setCompareFirstId(null);
+      setCompareSecondId(null);
+      setCompareJobId(result.jobId);
+    } catch (error) {
+      console.error("Unable to start the comparison.", error);
+      setComparing(false);
+      window.alert(error instanceof Error ? error.message : t("compare.failed"));
+    }
+  }, [active, compareFirstId, compareOffset, compareFatSim, comparePosFixa, compareMaxPages, t]);
+
+  function submitCompare(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canCompare) return;
+    if (!comparePosFixa && (!Number.isInteger(compareOffset) || compareOffset < 0 || compareOffset > 9)) {
+      setCompareError(t("compare.invalidOffset"));
+      return;
+    }
+    if (!comparePosFixa && !(compareFatSim >= 0.1 && compareFatSim <= 1)) {
+      setCompareError(t("compare.invalidFatsim"));
+      return;
+    }
+    if (!Number.isInteger(compareMaxPages) || compareMaxPages < 0 || compareMaxPages > 9999999) {
+      setCompareError(t("compare.invalidMaxPages"));
+      return;
+    }
+    setCompareError("");
+    setModal(null);
+    void startCompare();
+  }
+
+  const openCompareDialog = useCallback(() => {
+    if (!active) return;
+    setCompareError("");
+    setCompareSecondId(active.id);
+    setModal("compare");
   }, [active]);
 
   async function upload(file?: File) {
@@ -530,19 +617,48 @@ export default function Workbench({ user }: { user: SessionUser }) {
       else if (event.altKey && !event.ctrlKey && !event.shiftKey && /^[1-7]$/.test(key) && active) setAnnotationColor(annotationColors[Number(key) - 1]);
       else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "w" && openPdfs.length) setModal("windows");
       else if (event.ctrlKey && !event.altKey && !event.shiftKey && key === "f1") setModal("help");
+      else if (!event.ctrlKey && !event.altKey && !event.shiftKey && key === "f7" && active) markFirst();
+      else if (!event.ctrlKey && !event.altKey && !event.shiftKey && key === "f8" && canCompare) openCompareDialog();
+      else if (!event.ctrlKey && !event.altKey && !event.shiftKey && key === "f9" && (compareFirstId || compareSecondId)) clearCompare();
       else handled = false;
 
       if (handled) event.preventDefault();
     }
     document.addEventListener("keydown", handleMenuShortcut);
     return () => document.removeEventListener("keydown", handleMenuShortcut);
-  }, [active, clearPdfSelection, closeAllDocuments, closeDocument, closeOtherDocuments, copyPdfSelection, extractPages, goMatch, matches, modal, openCurrentSearch, openPdfs, profileOpen, search, selectedPdfText]);
+  }, [active, canCompare, clearCompare, clearPdfSelection, closeAllDocuments, closeDocument, closeOtherDocuments, compareFirstId, compareSecondId, copyPdfSelection, extractPages, goMatch, markFirst, matches, modal, openCompareDialog, openCurrentSearch, openPdfs, profileOpen, search, selectedPdfText, startCompare]);
 
   useEffect(() => {
     if (!searchOpen) return;
     searchInputRef.current?.focus();
     searchInputRef.current?.select();
   }, [searchOpen]);
+
+  useEffect(() => {
+    if (!compareJobId) return;
+    let active = true;
+    async function checkStatus() {
+      try {
+        const response = await fetch(`/api/compare/${compareJobId}`);
+        const result = await response.json().catch(() => ({})) as { status?: string; error?: string };
+        if (result.status === "failed") {
+          setComparing(false);
+          setCompareJobId(null);
+          window.alert(result.error ? `${t("compare.failed")} ${result.error}` : t("compare.failed"));
+        } else if (result.status === "done") {
+          setComparing(false);
+          setCompareJobId(null);
+          setCompareResultId(compareJobId);
+          setView("comparison");
+        }
+      } catch {
+        /* transient failure: keep polling */
+      }
+    }
+    void checkStatus();
+    const interval = window.setInterval(() => { if (active) void checkStatus(); }, 3000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [compareJobId, t]);
 
   return (
     <main className={`workbench ${view === "viewer" ? "" : "administration-view"}`}>
@@ -617,9 +733,9 @@ export default function Workbench({ user }: { user: SessionUser }) {
           </Menu>
           {/* Compare */}
           <Menu label={t("menu.compare")}>
-            <MenuItem shortcut="F7">{t("menu.compare.markFirst")}</MenuItem>
-            <MenuItem shortcut="F8">{t("menu.compare.run")}</MenuItem>
-            <MenuItem shortcut="F9">{t("menu.compare.clear")}</MenuItem>
+            <MenuItem shortcut="F7" disabled={!active || comparing} onClick={markFirst}>{t("menu.compare.markFirst")}</MenuItem>
+            <MenuItem shortcut="F8" disabled={!canCompare} onClick={openCompareDialog}>{t("menu.compare.run")}</MenuItem>
+            <MenuItem shortcut="F9" disabled={!(compareFirstId || compareSecondId) || comparing} onClick={clearCompare}>{t("menu.compare.clear")}</MenuItem>
           </Menu>
           {/* Window */}
           <Menu label={t("menu.window")}>
@@ -720,7 +836,11 @@ export default function Workbench({ user }: { user: SessionUser }) {
               className={item.id === activeId ? "active" : ""}
               key={item.id}
               onClick={() => activateDocument(item.id)}>
-              <span>{item.original_name}</span>
+              <span className="compare-tab-label">
+                <span>{item.original_name}</span>
+                {compareFirstId === item.id && <span className="compare-first-badge" title={t("menu.compare.markFirst")}>1</span>}
+                {compareSecondId === item.id && <span className="compare-second-badge" title={t("menu.compare.markSecond")}>2</span>}
+              </span>
               <X
                 size={14}
                 onClick={(event) => { event.stopPropagation(); closeDocument(item.id); }}
@@ -776,6 +896,8 @@ export default function Workbench({ user }: { user: SessionUser }) {
           ? <AuditPanel onClose={() => setView("viewer")} />
           : view === "errors" && user.isAdmin
           ? <ErrorLogPanel onClose={() => setView("viewer")} />
+          : view === "comparison" && compareResultId
+          ? <ComparisonResult jobId={compareResultId} baseUrl={compareBaseUrl} onClose={() => { setCompareResultId(null); setView("viewer"); }} />
           : active 
             ? <PdfViewer
               key={active.id}
@@ -866,6 +988,85 @@ export default function Workbench({ user }: { user: SessionUser }) {
               disabled={!pageSelection.trim()}
             >
               {t("menu.extract")}
+            </button>
+          </div>
+        </form>
+      </ModalFrame>}
+      {modal === "compare" && canCompare && compareFirst && active &&
+      <ModalFrame
+        title={t("compare.title")}
+        closeLabel={t("common.close")}
+        onClose={() => setModal(null)}
+      >
+        <form className="compare-form" onSubmit={submitCompare} noValidate>
+          <div className="compare-documents">
+            <div>
+              <span className="compare-doc-role">{t("compare.first")}</span>
+              <strong title={compareFirst.original_name}>{compareFirst.original_name}</strong>
+              <small>{t("viewer.pages", { count: formatNumber(compareFirst.page_count) })}</small>
+            </div>
+            <div>
+              <span className="compare-doc-role">{t("compare.second")}</span>
+              <strong title={active.original_name}>{active.original_name}</strong>
+              <small>{t("viewer.pages", { count: formatNumber(active.page_count) })}</small>
+            </div>
+          </div>
+          <label className="compare-check">
+            <input
+              type="checkbox"
+              checked={comparePosFixa}
+              onChange={(event) => setComparePosFixa(event.target.checked)}
+            />
+            {t("compare.posfixa")}
+          </label>
+          {!comparePosFixa && <div className="compare-grid">
+            <label>{t("compare.offset")}
+              <input
+                type="number"
+                min={0}
+                max={9}
+                step={1}
+                value={compareOffset}
+                onChange={(event) => setCompareOffset(Number(event.target.value))}
+              />
+            </label>
+            <label>{t("compare.fatsim")}
+              <input
+                type="number"
+                min={0.1}
+                max={1}
+                step={0.1}
+                value={compareFatSim}
+                onChange={(event) => setCompareFatSim(Number(event.target.value))}
+              />
+              <small>{t("compare.range")}</small>
+            </label>
+          </div>}
+          <label>{t("compare.maxPages")}
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={compareMaxPages}
+              onChange={(event) => setCompareMaxPages(Number(event.target.value))}
+            />
+            <small>{t("compare.allPages")}</small>
+          </label>
+          {compareError && <p className="form-error" role="alert">{compareError}</p>}
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setModal(null)}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={comparing}
+            >
+              {t("compare.start")}
             </button>
           </div>
         </form>
@@ -972,6 +1173,18 @@ export default function Workbench({ user }: { user: SessionUser }) {
         <div className="processing-indicator">
           <LoaderCircle size={30} aria-hidden="true" />
           <strong>{t("extract.processing")}</strong>
+        </div>
+      </div>}
+      {comparing && 
+      <div 
+        className="processing-overlay" 
+        role="status" 
+        aria-live="assertive"
+        aria-label={t("compare.processing")}
+      >
+        <div className="processing-indicator">
+          <LoaderCircle size={30} aria-hidden="true" />
+          <strong>{t("compare.processing")}</strong>
         </div>
       </div>}
     </main>

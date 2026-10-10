@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 export default async function Home() {
   const user = await getSessionUser();
   if (!user) redirect("/login");
-  return <Workbench user={user} />;
+  const compareBaseUrl = (process.env.PATSCOMPARE_PUBLIC_URL || "").replace(/\/+$/, "") || null;
+  return <Workbench user={user} compareBaseUrl={compareBaseUrl} />;
 }
 

@@ -2,29 +2,37 @@
 
 Visualizador web de PDFs com biblioteca no servidor, conversão de DOCX, XLSX e PPTX para PDF, múltiplas abas, pesquisa, anotações persistentes e administração por papéis e privilégios.
 
+## Gerar o instalador offline
+
+Execute `./make-install` em uma máquina com acesso à internet e ao Docker. O script lê a versão de `package.json`, usa essa versão nas tags das imagens e constrói as imagens da aplicação e do motor de OCR. Em seguida, baixa as imagens do serviço de escritório e do PostgreSQL usadas pelas tarefas auxiliares e cria `installer/patsxpdf-VERSÃO.tar.gz`.
+
+O pacote contém todas as imagens em `pats/patsxpdf/patsxpdf-images-VERSÃO.tar.gz`. Ao extrair o pacote na pasta home do usuário, será criada a pasta `pats/patsxpdf` com os scripts `install`, `start` e `stop`.
+
+```bash
+tar -xzf patsxpdf-VERSÃO.tar.gz -C "$HOME"
+cd "$HOME/pats/patsxpdf"
+./install
+```
+
+O instalador executa `docker load`, cria `.env` a partir de `.env.example` quando necessário e inicia o stack. Antes do uso em produção, revise as senhas, tokens, portas e `FONTS_PATH`.
+
 ## Execução com Docker
 
-1. Copie `.env.example` para `.env` e altere as senhas e a chave de sessão.
-2. Execute `docker compose up --build -d`.
-3. Acesse `http://localhost:3000` (ou a porta definida em `APP_PORT`).
+1. Instale o PostgreSQL compartilhado pelo projeto `patsdb` (ou configure um servidor PostgreSQL acessível pela rede `pats-production`).
+2. Copie `.env.example` para `.env` e ajuste as credenciais do banco e a chave de sessão.
+3. Para desenvolvimento, execute `docker compose -f docker-compose-build.yml up --build -d`.
+4. Acesse `http://localhost:3000` (ou a porta definida em `APP_PORT`).
 
 A conta inicial é `admin`, com senha `admin`. Altere-a na tela **Configurações > Usuários** após o primeiro acesso.
 
-Os dados do PostgreSQL, os PDFs e os resultados de OCR ficam nos volumes `postgres-data`, `pdf-data` e `ocr-data`. O schema e os registros iniciais são aplicados automaticamente na criação de um volume novo do banco. Arquivos DOCX, XLSX e PPTX enviados pelo usuário são convertidos para PDF pelo serviço interno `libreoffice` (Gotenberg) antes de serem armazenados; esse serviço não publica portas para o host.
+O PostgreSQL é compartilhado e deve estar disponível na rede Docker `pats-production`, no banco `pats` e com o schema `patsxpdf` acessível ao usuário configurado no `.env`. O Compose não cria um container de banco. Durante a instalação, o serviço `migrate` usa `POSTGRES_ADMIN_USER` e `POSTGRES_ADMIN_PASSWORD` para conceder acesso somente ao schema `patsxpdf` ao usuário de aplicação. Para usar um servidor do cliente, ajuste as credenciais de aplicação e administrativas no `.env`. Os PDFs e resultados de OCR permanecem nos volumes `pdf-data` e `ocr-data`. Arquivos DOCX, XLSX e PPTX enviados pelo usuário são convertidos para PDF pelo serviço interno `office` antes de serem armazenados; esse serviço não publica portas para o host.
 
-Para preservar a formatação dos documentos, as fontes instaladas no Windows são montadas no conversor em modo somente leitura. O caminho padrão para WSL é `/mnt/c/Windows/Fonts` e pode ser alterado com `WINDOWS_FONTS_PATH`. As fontes não são copiadas para o repositório nem incorporadas à imagem; a máquina que executar o stack deve possuir as licenças necessárias para utilizá-las.
+Para preservar a formatação dos documentos, as fontes instaladas no Windows são montadas no conversor em modo somente leitura. O caminho padrão para WSL é `/mnt/c/Windows/Fonts` e pode ser alterado com `FONTS_PATH`. As fontes não são copiadas para o repositório nem incorporadas à imagem; a máquina que executar o stack deve possuir as licenças necessárias para utilizá-las.
 
-As migrações pendentes são aplicadas automaticamente pelo serviço `migrate` antes da aplicação iniciar. Para aplicá-las manualmente:
+As migrações pendentes são aplicadas automaticamente pelo serviço `migrate` antes da aplicação iniciar, usando o schema `patsxpdf`. Para reaplicar/verificar o processo manualmente:
 
 ```bash
-docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < db/init/003-audit.sql
-docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < db/init/004-user-preferred-locale.sql
-docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < db/init/005-user-password-activation.sql
-docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < db/init/006-conversion-task.sql
-docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < db/init/007-audit-filename.sql
-docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < db/init/008-error-event.sql
-docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < db/init/009-ocr-task.sql
-docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < db/init/010-extraction-task.sql
+docker compose run --rm migrate
 ```
 
 ## Desenvolvimento local
@@ -45,9 +53,9 @@ npm run build
 
 `MAX_UPLOAD_MB` limita o arquivo recebido e também configura o limite da API de conversão. O tempo máximo pode ser ajustado com `OFFICE_CONVERTER_TIMEOUT` no container e `OFFICE_CONVERTER_TIMEOUT_MS` na aplicação.
 
-## OCR e PDFBox
+## OCR e extração de texto
 
-O serviço interno `pdfbox` usa Apache PDFBox 3 e Tesseract para OCR em português, inglês, espanhol e francês. Ele não publica portas para o host e exige o token compartilhado `PDFBOX_API_TOKEN`. `OCR_DPI`, `OCR_WORKERS` e `OCR_PAGE_TIMEOUT_SECONDS` controlam, respectivamente, a resolução, o paralelismo entre tarefas e o limite por página. Os PDFs pesquisáveis gerados pelo OCR são rasterizados na resolução configurada.
+O serviço interno `engine` faz extração nativa de texto e OCR com Tesseract em português, inglês, espanhol e francês. Ele não publica portas para o host e exige o token compartilhado `ENGINE_API_TOKEN`. `OCR_DPI`, `OCR_WORKERS` e `OCR_PAGE_TIMEOUT_SECONDS` controlam, respectivamente, a resolução, o paralelismo entre tarefas e o limite por página. Os PDFs pesquisáveis gerados pelo OCR são rasterizados na resolução configurada.
 
 As extrações de texto são híbridas. O PDFBox preserva o texto nativo e suas coordenadas, mascara essas regiões na imagem da página e aplica Tesseract somente ao conteúdo visual restante. Os fragmentos nativos e reconhecidos são então ordenados espacialmente. O resultado inclui um TXT na ordem de leitura e um JSON por página com coordenadas, origem (`native` ou `ocr`) e confiança do OCR.
 

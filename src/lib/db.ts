@@ -5,6 +5,7 @@ const globalForDb = globalThis as unknown as { pdfPool?: Pool };
 
 export const pool = globalForDb.pdfPool ?? new Pool({
   connectionString: process.env.DATABASE_URL,
+  options: "-c search_path=patsxpdf",
   max: 10,
 });
 

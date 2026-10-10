@@ -1,5 +1,5 @@
 #
-# PATSXPDF compose file
+# PATSXPDF build compose file
 # (c) PATS Technologies
 #
 networks:
@@ -18,8 +18,7 @@ services:
   # One-shot services
   #
   font-catalog:
-    image: patsxpdf-fonts:${PATSXPDF_VERSION:?Set PATSXPDF_VERSION}
-    pull_policy: never
+    image: gotenberg/gotenberg:8
     user: "0:0"
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -29,8 +28,7 @@ services:
       - font-catalog:/font-data
 
   migrate:
-    image: patsxpdf-migrate:${PATSXPDF_VERSION:?Set PATSXPDF_VERSION}
-    pull_policy: never
+    image: postgres:17-bookworm
     networks:
       - pats-production
     environment:
@@ -60,8 +58,7 @@ services:
   # 
   office:
     <<: [*basic-container]
-    image: patsxpdf-office:${PATSXPDF_VERSION:?Set PATSXPDF_VERSION}
-    pull_policy: never
+    image: gotenberg/gotenberg:8
     container_name: patsxpdf-office
     depends_on:
       font-catalog:
@@ -81,7 +78,8 @@ services:
   engine:
     <<: [*basic-container]
     image: patsxpdf-engine:${PATSXPDF_VERSION:?Set PATSXPDF_VERSION}
-    pull_policy: never
+    build:
+      context: ./pdfbox-service
     container_name: patsxpdf-engine
     environment:
       ENGINE_API_TOKEN: ${ENGINE_API_TOKEN:-development-only-change-me}
@@ -100,17 +98,17 @@ services:
   app:
     <<: [*basic-container]
     image: patsxpdf-app:${PATSXPDF_VERSION:?Set PATSXPDF_VERSION}
-    pull_policy: never
+    build: .
     container_name: patsxpdf-app
     depends_on:
-      font-catalog:
-        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       office:
         condition: service_healthy
       engine:
         condition: service_healthy
+      font-catalog:
+        condition: service_completed_successfully
     environment:
       PGHOST: ${POSTGRES_HOST:-pats-postgres}
       PGPORT: ${POSTGRES_PORT:-5432}
@@ -126,8 +124,6 @@ services:
       ENGINE_SERVICE_URL: http://engine:8080
       ENGINE_API_TOKEN: ${ENGINE_API_TOKEN:-development-only-change-me}
       ENGINE_REQUEST_TIMEOUT_MS: ${ENGINE_REQUEST_TIMEOUT_MS:-300000}
-      PATSCOMPARE_URL: ${PATSCOMPARE_URL:-http://patscompare-app:3000}
-      PATSCOMPARE_PUBLIC_URL: ${PATSCOMPARE_PUBLIC_URL:-}
     ports:
       - "${APP_PORT:-3002}:3000"
     volumes:

@@ -1,4 +1,6 @@
-services:
-  db:
-    ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+services: {}
+
+networks:
+  default:
+    name: pats-production
+    external: true

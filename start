@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$script_dir"
+
+if [[ -f VERSION ]]; then
+  IFS= read -r version < VERSION
+elif [[ -f package.json ]] && command -v jq >/dev/null 2>&1; then
+  version="$(jq -er '.version | select(type == "string" and length > 0)' package.json)"
+else
+  echo "ERROR: Could not determine PATSXPDF version." >&2
+  exit 1
+fi
+export PATSXPDF_VERSION="${PATSXPDF_VERSION:-$version}"
+
+if [[ ! -f .env ]]; then
+  echo "ERROR: Configuration file not found: ${script_dir}/.env" >&2
+  echo "Run ./install first." >&2
+  exit 1
+fi
+
+if ! docker network inspect pats-production >/dev/null 2>&1; then
+  printf 'Creating pats-production Docker network...\n'
+  docker network create pats-production >/dev/null
+fi
+
+FORCE_RECREATE=""
+if [[ "${1:-}" == "--force-recreate" ]]; then
+  FORCE_RECREATE="--force-recreate"
+fi
+printf 'Starting PATSXPDF services...\n'
+docker compose up -d $FORCE_RECREATE
+printf 'PATSXPDF started.\n'

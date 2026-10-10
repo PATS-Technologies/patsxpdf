@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+installer_root="${project_root}/installer"
+installer_dir="${installer_root}/pats/patsxpdf"
+
+cd "$project_root"
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is not installed or is not available in PATH." >&2
+  exit 1
+fi
+version="$(jq -er '.version | select(type == "string" and length > 0)' package.json)"
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+  echo "ERROR: Invalid package.json version: $version" >&2
+  exit 1
+fi
+export PATSXPDF_VERSION="$version"
+image_archive="${installer_dir}/patsxpdf-images-${version}.tar.gz"
+
+printf 'PATS Technologies\nPATSXPDF %s installer build\n\n' "$version"
+printf 'Checking prerequisites...\n'
+if ! command -v docker >/dev/null 2>&1; then
+  echo "ERROR: Docker is not installed or is not available in PATH." >&2
+  exit 1
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  echo "ERROR: Docker Compose v2 is not available." >&2
+  exit 1
+fi
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: The current user cannot connect to the Docker daemon." >&2
+  exit 1
+fi
+printf 'Done.\n'
+
+printf '\nBuilding application images...\n'
+docker compose --env-file .env.example --file docker-compose-build.yml build --pull app engine
+
+printf '\nDownloading infrastructure images...\n'
+docker pull postgres:17-bookworm
+docker tag postgres:17-bookworm "patsxpdf-migrate:${version}"
+
+docker pull gotenberg/gotenberg:8
+docker tag gotenberg/gotenberg:8 "patsxpdf-office:${version}"
+docker tag gotenberg/gotenberg:8 "patsxpdf-fonts:${version}"
+
+printf '\nCreating installer structure...\n'
+rm -rf -- "${installer_root}/pats"
+mkdir -p "$installer_dir"
+cp docker-compose.yml "$installer_dir/docker-compose.yml"
+cp start stop install "$installer_dir/"
+cp -a db "$installer_dir/db"
+printf '%s\n' "$version" > "$installer_dir/VERSION"
+{
+  printf 'PATSXPDF_VERSION=%s\n' "$version"
+  cat .env.example
+} > "$installer_dir/.env.example"
+chmod +x "$installer_dir/start" "$installer_dir/stop" "$installer_dir/install"
+chmod +x "$installer_dir"/db/*.sh
+
+printf '\nExporting Docker images to %s...\n' "$image_archive"
+temporary_archive="${image_archive}.tmp"
+trap 'rm -f -- "$temporary_archive"' EXIT
+docker save \
+  "patsxpdf-migrate:${version}" \
+  "patsxpdf-office:${version}" \
+  "patsxpdf-fonts:${version}" \
+  "patsxpdf-engine:${version}" \
+  "patsxpdf-app:${version}" \
+  | gzip > "$temporary_archive"
+mv -- "$temporary_archive" "$image_archive"
+trap - EXIT
+
+# Removes old installer packages
+rm -f "${installer_root}/patsxpdf-*.tar.gz"
+
+# Creates new installer package
+package="${installer_root}/patsxpdf-${version}.tar.gz"
+printf '\nCreating installer package %s...\n' "$package"
+temporary_package="${package}.tmp"
+trap 'rm -f -- "$temporary_package"' EXIT
+tar -C "$installer_root" -czf "$temporary_package" ./pats
+mv -- "$temporary_package" "$package"
+trap - EXIT
+printf '\nInstaller created successfully:\n%s\n' "$package"
+
+# Copies the installer package to a test location for verification
+printf '\nCopying tarfile to /home/test for testing...\n'
+sudo cp "$package" /home/test/
+sudo chown test:test "/home/test/$(basename "$package")"
+printf 'Copied.\n\n'
+printf 'To test the installation:\n'
+printf 'su test (password: test)\n'
+printf 'cd ~\n'
+printf 'cd pats/patsxpdf\n' 
+printf './install\n'

@@ -1,6 +1,6 @@
 import "server-only";
 
-const officeConverterUrl = process.env.OFFICE_CONVERTER_URL ?? "http://libreoffice:3000";
+const officeConverterUrl = process.env.OFFICE_CONVERTER_URL ?? "http://office:3000";
 const conversionTimeoutMs = Number(process.env.OFFICE_CONVERTER_TIMEOUT_MS ?? 120_000);
 
 export class OfficeConversionError extends Error {

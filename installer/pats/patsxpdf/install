@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+version_file="${script_dir}/VERSION"
+if [[ ! -f "$version_file" ]]; then
+  echo "ERROR: Installer version file not found: $version_file" >&2
+  exit 1
+fi
+IFS= read -r version < "$version_file"
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+  echo "ERROR: Invalid installer version: $version" >&2
+  exit 1
+fi
+image_archive="${script_dir}/patsxpdf-images-${version}.tar.gz"
+
+cd "$script_dir"
+
+printf 'PATS Technologies\nPATSXPDF %s installer\n\n' "$version"
+printf 'Checking prerequisites...\n'
+if ! command -v docker >/dev/null 2>&1; then
+  echo "ERROR: Docker is not installed or is not available in PATH." >&2
+  exit 1
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  echo "ERROR: Docker Compose v2 is not available." >&2
+  exit 1
+fi
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: The current user cannot connect to the Docker daemon." >&2
+  exit 1
+fi
+if [[ ! -f "$image_archive" ]]; then
+  echo "ERROR: Docker image archive not found: $image_archive" >&2
+  exit 1
+fi
+printf 'Done.\n'
+
+printf 'Loading PATSXPDF Docker images...\n'
+docker load --input "$image_archive"
+
+required_images=(
+  "patsxpdf-app:${version}"
+  "patsxpdf-engine:${version}"
+  "patsxpdf-office:${version}"
+  "patsxpdf-fonts:${version}"
+  "patsxpdf-migrate:${version}"
+)
+for image in "${required_images[@]}"; do
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "ERROR: Required image was not loaded: $image" >&2
+    exit 1
+  fi
+done
+printf 'Images loaded.\n'
+
+if [[ ! -f .env ]]; then
+  cp .env.example .env
+  chmod 600 .env
+  printf 'Configuration file created at %s/.env.\n' "$script_dir"
+  printf 'Review passwords, tokens, ports and FONTS_PATH before production use.\n'
+else
+  added=0
+  while IFS= read -r line; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    key="${line%%=*}"
+    if [[ "$key" == "PATSXPDF_VERSION" ]]; then
+      continue
+    fi
+    if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && ! grep -qE "^[[:space:]]*${key}=" .env; then
+      if [[ "$added" -eq 0 ]]; then
+        printf '\n# Added by PATSXPDF %s installer\n' "$version" >> .env
+      fi
+      printf '%s\n' "$line" >> .env
+      printf 'Added new configuration key to .env: %s\n' "$key"
+      added=1
+    fi
+  done < .env.example
+  if [[ "$added" -eq 1 ]]; then
+    printf 'Review the newly added configuration keys in %s/.env.\n' "$script_dir"
+  fi
+fi
+
+if [[ "${1:-}" == "--force-recreate" ]]; then
+  ./start --force-recreate
+else
+  ./start
+fi
+printf '\nInstallation completed.\n'

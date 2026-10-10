@@ -44,10 +44,21 @@ function DetailsDialog({ details, onClose }: { details: string; onClose: () => v
     return () => { if (dialog?.open) dialog.close(); };
   }, []);
 
-  return <dialog ref={dialogRef} className="modal conversion-details" aria-label={t("conversion.detailsTitle")} onCancel={(event) => { event.preventDefault(); onClose(); }}>
-    <header><h2>{t("conversion.detailsTitle")}</h2><button className="icon-button" title={t("common.close")} onClick={onClose}><X size={18} /></button></header>
-    <pre>{details}</pre>
-  </dialog>;
+  return (
+    <dialog 
+      ref={dialogRef} 
+      className="modal conversion-details" 
+      aria-label={t("conversion.detailsTitle")} 
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+    >
+      <header>
+        <h2>{t("conversion.detailsTitle")}</h2>
+        <button className="icon-button" title={t("common.close")} onClick={onClose}><X size={18} />
+        </button>
+      </header>
+      <pre>{details}</pre>
+    </dialog>
+  );
 }
 
 export function ConversionsPanel({
@@ -68,7 +79,9 @@ export function ConversionsPanel({
   const [details, setDetails] = useState<string | null>(null);
   const [error, setError] = useState("");
   const selectedIndex = conversions.findIndex((record) => record.id === selectedId);
+  
   useEscape(onClose, true, true);
+  
   const { page, pageCount, pageItems, setContainer, setPage } = usePaginatedItems({
     items: conversions,
     selectedIndex,
@@ -109,31 +122,94 @@ export function ConversionsPanel({
     });
   }
 
-  return <div className="admin-page">
-    <header><div><p className="eyebrow">{t("conversion.eyebrow")}</p><h1>{t("conversion.title")}</h1></div><button className="icon-button" title={t("common.close")} onClick={onClose}><X size={18} /></button></header>
-    {error && <p className="form-error" role="alert">{error}</p>}
-    <div ref={setContainer} className="table-scroll admin-table"><table><thead><tr>
-      {user.isAdmin && <th>{t("conversion.user")}</th>}
-      <th>{t("conversion.id")}</th>
-      <th>{t("conversion.uploadedAt")}</th>
-      <th>{t("conversion.file")}</th>
-      <th>{t("conversion.status")}</th>
-      <th>{t("conversion.view")}</th>
-      <th>{t("conversion.message")}</th>
-    </tr></thead><tbody>{pageItems.map((record) => {
-      const canView = (record.status === "ok" || record.status === "alert") && Boolean(record.document_id);
-      const summary = record.details?.split(/\r?\n/, 1)[0] ?? "";
-      return <tr key={record.id} className={selectedId === record.id ? "selected" : ""} onClick={() => onSelect(record.id)}>
-        {user.isAdmin && <td>{record.user_name} <small className="mono">({record.user_login})</small></td>}
-        <td className="mono">{record.id}</td>
-        <td>{formatDate(record.uploaded_at)}</td>
-        <td>{record.original_name}</td>
-        <td><span className={`status ${record.status === "ok" ? "ok" : record.status === "alert" ? "warning" : record.status === "error" ? "danger" : ""}`}>{t(`conversion.status.${record.status}`)}</span></td>
-        <td><button className="conversion-view" disabled={!canView} title={t("conversion.view")} onClick={(event) => { event.stopPropagation(); open(record); }}><Eye size={15} />{t("conversion.view")}</button></td>
-        <td>{summary ? <button className="conversion-message" onClick={(event) => { event.stopPropagation(); setDetails(record.details); }}>{summary}</button> : "-"}</td>
-      </tr>;
-    })}</tbody></table></div>
-    <TablePagination page={page} pageCount={pageCount} onPageChange={setPage} />
-    {details && <DetailsDialog details={details} onClose={() => setDetails(null)} />}
-  </div>;
+  return (
+    <div className="admin-page">
+      <header>
+        <div>
+          <p className="eyebrow">{t("conversion.eyebrow")}</p>
+          <h1>{t("conversion.title")}</h1>
+        </div>
+        <button className="icon-button" title={t("common.close")} onClick={onClose}>
+          <X size={18} />
+        </button>
+      </header>
+      {error && 
+      <p className="form-error" role="alert">{error}</p>
+      }
+      <div ref={setContainer} className="table-scroll admin-table">
+        <table>
+          <thead>
+            <tr>
+              {user.isAdmin && 
+              <th>{t("conversion.user")}</th>
+              }
+              <th>{t("conversion.id")}</th>
+              <th>{t("conversion.uploadedAt")}</th>
+              <th>{t("conversion.file")}</th>
+              <th>{t("conversion.status")}</th>
+              <th>{t("conversion.view")}</th>
+              <th>{t("conversion.message")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!pageItems.length && !error &&
+            <tr><td colSpan={user.isAdmin ? 7 : 6} className="table-empty">{t("conversion.empty")}</td></tr>
+            }
+            {pageItems.map((record) => {
+              const canView = (record.status === "ok" || record.status === "alert") && Boolean(record.document_id);
+              const summary = record.details?.split(/\r?\n/, 1)[0] ?? "";
+              return (
+                <tr key={record.id} className={selectedId === record.id ? "selected" : ""} onClick={() => onSelect(record.id)}>
+                  {user.isAdmin && 
+                  <td>{record.user_name} 
+                    <small className="mono">({record.user_login})</small>
+                  </td>}
+                  <td className="mono">
+                    {record.id}
+                  </td>
+                  <td>
+                    {formatDate(record.uploaded_at)}
+                  </td>
+                  <td>
+                    {record.original_name}
+                  </td>
+                  <td>
+                    <span className={`status ${record.status === "ok" ? "ok" : record.status === "alert" ? "warning" : record.status === "error" ? "danger" : ""}`}>
+                    {t(`conversion.status.${record.status}`)}
+                    </span>
+                  </td>
+                  <td>
+                    <button 
+                      className="conversion-view" 
+                      disabled={!canView} 
+                      title={t("conversion.view")} 
+                      onClick={(event) => { event.stopPropagation(); open(record); }}>
+                        <Eye size={15} />
+                        {t("conversion.view")
+                      }
+                    </button>
+                  </td>
+                  <td>
+                    {summary 
+                      ? <button 
+                          className="conversion-message" 
+                          onClick={(event) => { event.stopPropagation(); setDetails(record.details); }}
+                        >
+                          {summary}
+                        </button> 
+                      : "-"
+                    }
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <TablePagination page={page} pageCount={pageCount} onPageChange={setPage} />
+      {details && 
+      <DetailsDialog details={details} onClose={() => setDetails(null)} />
+      }
+  </div>
+  );
 }

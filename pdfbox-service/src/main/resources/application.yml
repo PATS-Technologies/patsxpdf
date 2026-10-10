@@ -9,8 +9,8 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 30s
 pdfbox:
-  jobs-path: ${PDFBOX_JOBS_PATH:/data/jobs}
-  api-token: ${PDFBOX_API_TOKEN:development-only-change-me}
+  jobs-path: ${ENGINE_JOBS_PATH:/data/jobs}
+  api-token: ${ENGINE_API_TOKEN:development-only-change-me}
   dpi: ${OCR_DPI:300}
   workers: ${OCR_WORKERS:1}
   tesseract-timeout-seconds: ${OCR_PAGE_TIMEOUT_SECONDS:180}
